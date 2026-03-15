@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from baselines.all_baselines import Poly2SLS, Vanilla2SLS, DirectNN, \
-    GMM, DeepIV, AGMM
+    GMM, DeepIV, AGMM, HAS_DEEPIV
 import os
 from scenarios.abstract_scenario import AbstractScenario
 import tensorflow
@@ -22,7 +22,13 @@ def run_experiment(scenario_name, num_reps=10, seed=527):
     # set random seed
     torch.manual_seed(seed)
     np.random.seed(seed)
-    tensorflow.set_random_seed(seed)
+    # TensorFlow 1.x vs 2.x compatibility
+    try:
+        # TF 2.x style
+        tensorflow.random.set_seed(seed)
+    except AttributeError:  # pragma: no cover
+        # TF 1.x style
+        tensorflow.set_random_seed(seed)
 
     scenario_path = "data/zoo/" + scenario_name + ".npz"
     scenario = AbstractScenario(filename=scenario_path)
@@ -44,7 +50,8 @@ def run_experiment(scenario_name, num_reps=10, seed=527):
         methods += [("DirectNN", DirectNN())]
         methods += [("GMM", GMM(g_model="2-layer", n_steps=20))]
         methods += [("AGMMw", AGMM())]
-        methods += [("DeepIV", DeepIV())]
+        if HAS_DEEPIV:
+            methods += [("DeepIV", DeepIV())]
 
         for method_name, method in methods:
             print("Running " + method_name)

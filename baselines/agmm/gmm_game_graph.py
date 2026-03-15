@@ -1,4 +1,5 @@
 import tensorflow as tf
+tf = tf.compat.v1
 import math
 import numpy as np
 

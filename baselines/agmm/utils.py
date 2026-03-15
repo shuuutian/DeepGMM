@@ -3,6 +3,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
+tf = tf.compat.v1
+tf.disable_eager_execution()
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.mlab as mlab
 from scipy.interpolate import griddata

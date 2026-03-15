@@ -24,7 +24,21 @@ import torch.nn.functional as F
 import torch.utils.data as data_utils
 
 import keras
-from econml.deepiv import DeepIVEstimator
+try:
+    # Original import used in this 2019 codebase
+    from econml.deepiv import DeepIVEstimator
+except ImportError:  # pragma: no cover
+    try:
+        # Newer econml versions expose DeepIV under econml.iv.nnet.DeepIV
+        from econml.iv.nnet import DeepIV as DeepIVEstimator
+    except ImportError:  # pragma: no cover
+        try:
+            # Fall back to standalone deepiv package if installed
+            from deepiv import DeepIVEstimator
+        except ImportError:  # pragma: no cover
+            DeepIVEstimator = None
+
+HAS_DEEPIV = DeepIVEstimator is not None
 
 import statsmodels.sandbox.regression.gmm
 import statsmodels.tools.tools
@@ -164,6 +178,12 @@ class DirectNN(SklearnBaseline):
 
 class DeepIV(AbstractBaseline):
     def __init__(self, treatment_model=None):
+        if DeepIVEstimator is None:  # pragma: no cover
+            raise ImportError(
+                "DeepIV baseline is unavailable: this econml version does not "
+                "provide DeepIVEstimator. Install a compatible econml version "
+                "or remove DeepIV from the baselines you run."
+            )
         if treatment_model is None:
             print("Using standard treatment model...")
             self._treatment_model = lambda input_shape: keras.Sequential(

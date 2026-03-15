@@ -1,5 +1,7 @@
 import numpy as np
 import tensorflow as tf
+tf = tf.compat.v1
+tf.disable_eager_execution()
 from datetime import datetime
 from .utils import LoopIterator, log_function, scope_variables
 from .gmm_game_graph import GMMGameGraph
