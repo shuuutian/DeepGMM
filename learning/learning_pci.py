@@ -110,7 +110,7 @@ class SGDLearningPCI:
                 return
             current = self.h.state_dict()
             for key in self.theta_bar.keys():
-                self.theta_bar[key] = self.ema_alpha * self.theta_bar[key] + (1.0 - self.ema_alpha) * current[key].detach()
+                self.theta_bar[key] = (1.0 - self.ema_alpha) * self.theta_bar[key] + self.ema_alpha * current[key].detach()
 
     def _load_theta_bar_model(self):
         h_bar = copy.deepcopy(self.h)
