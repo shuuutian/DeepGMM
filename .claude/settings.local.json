@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python configs/load_config.py smoke && .venv/bin/python configs/load_config.py ablation_missing)",
+      "Bash(.venv/bin/python run_pci_compare.py --help)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(source:*)"
+    ]
+  }
+}

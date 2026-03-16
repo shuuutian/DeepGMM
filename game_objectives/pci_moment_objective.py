@@ -62,6 +62,19 @@ class PCIOptimalMomentObjective(AbstractObjective):
             s_tilde[~obs_mask] = self._as_1d(v_theta_bar)[~obs_mask]
 
         moment = (f_l * residual).mean()
-        f_reg = self.lambda_1 * (f_l.pow(2) * s_tilde).mean()
+
+        # Normalise s_tilde by its batch mean before computing f_reg.
+        #
+        # Without normalisation, f_reg = λ·E[f²·s̃] grows proportionally to
+        # the residual variance.  Early in training s̃ ≫ 1 (because h_bar has
+        # not converged yet), so f_reg dominates the f-loss and pushes f → 0.
+        # Once f collapses the gradient signal to h vanishes and the system
+        # enters an absorbing state (f=0, h frozen) from which it never
+        # recovers.  Dividing by mean(s̃) makes the effective regularisation
+        # strength λ·E[f²·(s̃/mean(s̃))] = λ·E[f²·ŝ] where mean(ŝ)=1,
+        # preventing collapse regardless of the absolute residual scale while
+        # preserving the relative (optimal-instrument) weighting across units.
+        s_mean = s_tilde.detach().mean().clamp(min=1e-8)
+        f_reg = self.lambda_1 * (f_l.pow(2) * (s_tilde / s_mean)).mean()
         return moment, -moment + f_reg
 

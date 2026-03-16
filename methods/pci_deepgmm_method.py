@@ -90,7 +90,7 @@ class PCIDeepGMMMethod:
             max_num_epochs=self.max_num_epochs,
             batch_size=self.batch_size,
         )
-        learner.fit(train_data=train_data, verbose=verbose)
+        learner.fit(train_data=train_data, dev_data=dev_data, verbose=verbose)
 
         self.h = h
         self.f = f

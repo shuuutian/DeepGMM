@@ -1,0 +1,134 @@
+# PCI DeepGMM experiment parameter sets
+# Load in Python via:
+#   import tomllib
+#   with open("configs/experiment_params.toml", "rb") as f:
+#       cfg = tomllib.load(f)
+#   params = cfg["sets"]["standard"]
+
+# ── Shared defaults (overridden per set) ──────────────────────────────────────
+[defaults]
+# data
+n_train      = 2000
+n_dev        = 500
+n_test       = 10
+missing_rate = 0.3
+seed         = 42
+
+# network  (h input_dim=2, f input_dim=3 — fixed by DGP variable dims)
+h_layers = [64, 64]
+f_layers = [64, 64]
+
+# optimizer (OAdam)
+h_lr    = 2.0e-4
+f_lr    = 8.0e-4
+h_betas = [0.5, 0.9]
+f_betas = [0.5, 0.9]
+
+# learning loop
+n_folds        = 5
+max_num_epochs = 300
+batch_size     = 256
+ema_alpha      = 0.05
+ridge          = 1.0e-3
+lambda_1       = 0.25    # f_reg weight in PCIOptimalMomentObjective
+enable_cuda    = false
+
+# ── Set A: smoke test ─────────────────────────────────────────────────────────
+# Purpose : quick sanity check — pipeline runs, loss is finite, no NaN
+# Runtime : < 2 min on CPU
+[sets.smoke]
+n_train        = 1000
+n_dev          = 300
+missing_rate   = 0.3
+h_layers       = [64, 64]
+f_layers       = [64, 64]
+max_num_epochs = 400     # enough for burn_in=200 + model selection to kick in
+batch_size     = 256
+n_folds        = 5
+ema_alpha      = 0.05
+ridge          = 1.0e-3
+
+# ── Set B: standard experiment ────────────────────────────────────────────────
+# Purpose : single-run production quality; use for initial ATE bias check
+# Runtime : ~10 min on CPU
+[sets.standard]
+n_train        = 2000
+n_dev          = 500
+missing_rate   = 0.3
+h_layers       = [64, 64]
+f_layers       = [64, 64]
+h_lr           = 2.0e-4
+f_lr           = 8.0e-4
+max_num_epochs = 300
+batch_size     = 256
+n_folds        = 5
+ema_alpha      = 0.05
+ridge          = 1.0e-3
+
+# ── Set C: Monte Carlo comparison ─────────────────────────────────────────────
+# Purpose : oracle / modified / naive comparison across 50 seeds
+#           feeds directly into run_pci_compare.py
+# Runtime : ~hours; use slurm_job.sh for Spartan
+[sets.compare]
+n_train        = 2000
+n_dev          = 500
+missing_rate   = 0.3
+h_layers       = [64, 64]
+f_layers       = [64, 64]
+h_lr           = 2.0e-4
+f_lr           = 8.0e-4
+max_num_epochs = 300
+batch_size     = 256
+n_folds        = 5
+ema_alpha      = 0.05
+ridge          = 1.0e-3
+# comparison-script-specific
+n_rep          = 300
+num_cpus       = 10
+dump_root      = "dumps"
+
+# ── Set D: missing-rate ablation ──────────────────────────────────────────────
+# Purpose : sweep missing_rate to show modified vs naive gap widens
+#           run_pci_compare.py once per entry; keep all other params fixed
+# Expected behaviour:
+#   rate=0.1 → modified ≈ naive  (little missingness, imputation barely helps)
+#   rate=0.3 → |bias_modified| < |bias_naive|          (main result)
+#   rate=0.5 → gap widens                              (pressure test)
+#   rate=0.7 → extreme; both deteriorate but modified still better
+[sets.ablation_missing]
+missing_rates  = [0.1, 0.3, 0.5, 0.7]
+n_train        = 2000
+n_dev          = 500
+h_layers       = [64, 64]
+f_layers       = [64, 64]
+h_lr           = 2.0e-4
+f_lr           = 8.0e-4
+max_num_epochs = 300
+batch_size     = 256
+n_folds        = 5
+ema_alpha      = 0.05
+ridge          = 1.0e-3
+n_rep          = 30
+num_cpus       = 4
+
+# ── Set E: learning-rate sensitivity ─────────────────────────────────────────
+# Purpose : verify the 4x lr ratio between f and h is important
+# Each entry is [h_lr, f_lr]
+[sets.lr_sensitivity]
+lr_pairs = [
+    [1.0e-4, 4.0e-4],   # conservative
+    [2.0e-4, 8.0e-4],   # default
+    [5.0e-4, 2.0e-3],   # aggressive
+    [2.0e-4, 2.0e-4],   # equal (expected: slower / unstable)
+]
+n_train        = 2000
+n_dev          = 500
+missing_rate   = 0.3
+h_layers       = [64, 64]
+f_layers       = [64, 64]
+max_num_epochs = 300
+batch_size     = 256
+n_folds        = 5
+ema_alpha      = 0.05
+n_rep          = 20
+num_cpus       = 4
