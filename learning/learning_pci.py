@@ -36,7 +36,7 @@ class SGDLearningPCI:
         ema_alpha: float = 0.05,
         ridge: float = 1e-3,
         eval_freq: int = 20,        # evaluate dev set every N epochs
-        burn_in: int = 100,         # epochs before checkpoint selection starts
+        burn_in: int = 200,         # epochs before checkpoint selection starts
     ):
         self.game_objective = game_objective
         self.h = h

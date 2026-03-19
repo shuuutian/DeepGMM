@@ -69,8 +69,8 @@ class PCIDeepGMMMethod:
         if self.enable_cuda and torch.cuda.is_available():
             train_data = train_data.to_gpu()
 
-        h = MLPModel(input_dim=2, layer_widths=[64, 32], activation=nn.LeakyReLU).double()
-        f = MLPModel(input_dim=3, layer_widths=[64, 32], activation=nn.LeakyReLU).double()
+        h = MLPModel(input_dim=2, layer_widths=[64, 64], activation=nn.LeakyReLU).double()
+        f = MLPModel(input_dim=3, layer_widths=[64, 64], activation=nn.LeakyReLU).double()
         if self.enable_cuda and torch.cuda.is_available():
             h = h.cuda()
             f = f.cuda()

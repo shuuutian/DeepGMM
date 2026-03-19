@@ -186,7 +186,7 @@ def main() -> None:
     n_train       = _resolve(args.n_train,      config, "n_train",        2000)
     n_dev         = _resolve(args.n_dev,        config, "n_dev",          800)
     n_folds       = _resolve(args.n_folds,      config, "n_folds",        5)
-    max_num_epochs= _resolve(args.max_epochs,   config, "max_num_epochs", 250)
+    max_num_epochs= _resolve(args.max_epochs,   config, "max_num_epochs", 500)
     batch_size    = _resolve(args.batch_size,   config, "batch_size",     256)
     dump_root     = _resolve(args.dump_root,    config, "dump_root",      "dumps")
     num_cpus      = _resolve(args.num_cpus,     config, "num_cpus",       1)
