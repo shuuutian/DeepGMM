@@ -4,26 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-All commands must be run from the repo root with the venv active:
-
-```bash
-source .venv/bin/activate
-```
+All commands must be run from the repo root via `uv run` (no manual venv activation).
 
 **Run all PCI tests:**
 ```bash
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 **Run a single test file or function:**
 ```bash
-pytest tests/test_demand_dgp.py -v
-pytest tests/test_pci_method.py::test_oracle_method_convergence -v
+uv run pytest tests/test_demand_dgp.py -v
+uv run pytest tests/test_pci_method.py::test_oracle_method_convergence -v
 ```
 
 **Run the full comparison experiment (local, 1 CPU):**
 ```bash
-python run_pci_compare.py --n-rep 5 --missing-rate 0.3 --n-train 2000 --no-cuda
+uv run python run_pci_compare.py --n-rep 5 --missing-rate 0.3 --n-train 2000 --no-cuda
 ```
 
 **Submit to Spartan HPC:**
@@ -33,7 +29,7 @@ sbatch slurm_job.sh   # runs 100 reps, 8 CPUs, on /home/wzzho2/DeepGMM
 
 **Install dependencies:**
 ```bash
-pip install -e .   # uses pyproject.toml (numpy, scipy, torch, matplotlib, scikit-learn, tensorflow)
+uv pip install -e .   # uses pyproject.toml (numpy, scipy, torch, matplotlib, scikit-learn, tensorflow)
 ```
 
 There is no linter or formatter configured.
@@ -44,6 +40,8 @@ This repo contains two coexisting codebases:
 
 ### 1. Original DeepGMM (Bennett et al. 2019)
 The original IV framework for general nonparametric IV regression. Entry points are `run_mnist_experiments_*.py` and `run_zoo_experiments_ours.py`. Uses `scenarios/toy_scenarios.py` and `scenarios/mnist_scenarios.py` for DGPs. The data structure is a plain `Dataset` object (fields: `x, z, y, g, w`) defined in `scenarios/abstract_scenario.py`.
+
+The reference original DeepGMM commit is `c2a62ed` (the merge from `CausalML/DeepGMM`, immediately before the MAR fork at `15453ca`). Walk-throughs and theory anchoring reference this hash.
 
 ### 2. Modified DeepGMM for Proximal Causal Inference (PCI) — the active research extension
 Implements the min-max estimator for the PCI bridge function $h_\theta(W,A)$ under Missing-at-Random (MAR) outcome proxy $W$. All new code lives in:
@@ -84,3 +82,20 @@ EMA update (correct direction): `theta_bar ← (1 - ema_alpha) * theta_bar + ema
 | Comparison script reference | `/Users/apple/DeepFeatureProxyVariable/scripts/compare_dfpv_variants.py` |
 | Working paper (LaTeX) | `/Users/apple/2602_WenPaper/PCI_paper_draft_overleaf/main.tex` |
 | Spartan remote root | `/home/wzzho2/DeepGMM` |
+
+## Validation-protocol artefacts
+
+Work on this repo follows the systematic validation protocol at the Notion page **0425 - Systematic Validation Plan** (https://www.notion.so/34d64b068dfc80259c89d01feee5fc3c). Read it before starting any new validation iteration.
+
+Conventions defined there and used throughout the repo:
+
+- **Four canonical run roles** on identical DGP and seeds:
+  - `B` — original DeepGMM, naive on the observed-only subsample (lower bound).
+  - `O_orig` — original DeepGMM on full data, no missingness (upper bound).
+  - `O_mar` — MAR-DeepGMM on full data, no missingness (upper bound; sanity check).
+  - `M` — MAR-DeepGMM on the partial-data setting (the run under test, replaced each iteration).
+- **Git tagging.** Each run tags the code before executing: `git tag run/<role>/<YYYYMMDD-NN>`. No tag, no run.
+- **Output folder.** `dumps/<YYYYMMDD-HHMMSS>__<git-tag>__<role>/` containing `results.csv`, `config.json`, `env.lock`, `README.md`.
+- **Research diary.** `RESEARCH_DIARY.md` at repo root is the chronological per-run record. Consulted before designing any new sub-experiment to avoid re-running prior trials. (File created on the first run of Phase 1, not yet present.)
+
+Walk-throughs and the §4.2 theory-anchoring map live as separate pages in the same Notion Research database.

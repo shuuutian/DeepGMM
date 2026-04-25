@@ -53,15 +53,20 @@ def _one_rep(
     results = []
     diagnostics = []  # per-epoch rows
 
-    # oracle and naive use the original DeepGMM objective + model selection;
-    # modified uses our PCI-adapted objective with MAR imputation.
+    # Four canonical roles (validation protocol §5):
+    #   B      = original DeepGMM, naive on observed-only subsample (lower bound)
+    #   O_orig = original DeepGMM on full data (upper bound)
+    #   O_mar  = MAR-DeepGMM on full data (upper bound, sanity)
+    #   M      = MAR-DeepGMM on partial data, MAR (the thing under test)
+    # Tuple shape: (label, scenario_mode, impl, internal_mode)
     MODES = [
-        ("oracle",   "oracle",       "original"),
-        ("modified", "mar_modified", "pci"),
-        ("naive",    "mar_naive",    "original"),
+        ("B",      "mar_naive",    "original", "naive"),
+        ("O_orig", "oracle",       "original", "oracle"),
+        ("O_mar",  "oracle",       "pci",      "oracle"),
+        ("M",      "mar_modified", "pci",      "modified"),
     ]
 
-    for method_mode, scenario_mode, impl in MODES:
+    for label, scenario_mode, impl, internal_mode in MODES:
         scenario = DemandScenario(mode=scenario_mode)
         scenario.setup(num_train=n_train, num_dev=n_dev, num_test=10,
                        missing_rate=missing_rate, seed=seed)
@@ -73,9 +78,8 @@ def _one_rep(
         a0 = float(test.treatment_grid[-1, 0])
 
         if impl == "original":
-            # oracle / naive: use original OptimalMomentObjective + model selection
             method = OriginalDeepGMMBaseline(
-                mode=method_mode,
+                mode=internal_mode,
                 max_num_epochs=max_num_epochs,
                 batch_size=batch_size,
                 burn_in=burn_in,
@@ -91,9 +95,8 @@ def _one_rep(
             dev_moment_history = method.dev_moment_history
             best_ckpt_epoch = method.best_checkpoint_epoch
         else:
-            # modified: use our PCI method with MAR-imputed residuals
             method = PCIDeepGMMMethod(
-                mode="modified",
+                mode=internal_mode,
                 n_folds=n_folds,
                 missing_rate=missing_rate,
                 enable_cuda=use_cuda,
@@ -110,7 +113,7 @@ def _one_rep(
 
         results.append({
             "rep": seed,
-            "method": method_mode,
+            "method": label,
             "ate_hat": float(ate_hat),
             "ate_true": ate_true,
             "bias": float(ate_hat - ate_true),
@@ -125,7 +128,7 @@ def _one_rep(
             dev_moment = dev_moment_dict.get(epoch, float("nan"))
             diagnostics.append({
                 "rep": seed,
-                "method": method_mode,
+                "method": label,
                 "epoch": epoch,
                 "h_loss": h_loss,
                 "f_loss": f_loss,
@@ -151,7 +154,7 @@ def _resolve(cli_val, config: Dict[str, Any], key: str, fallback):
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compare oracle/modified/naive PCI DeepGMM.",
+        description="Compare four canonical roles (B / O_orig / O_mar / M) on the demand DGP.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -262,9 +265,10 @@ def main() -> None:
     )
 
     _color_map = {
-        "modified": "#B221E2",
-        "naive":    "#DD8452",
-        "oracle":   "#55A868",
+        "B":      "#DD8452",
+        "O_orig": "#55A868",
+        "O_mar":  "#4C72B0",
+        "M":      "#B221E2",
     }
     plt.style.use("ggplot")
     fig, ax = plt.subplots(figsize=(9, 5.6))
