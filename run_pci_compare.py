@@ -20,9 +20,32 @@ from joblib import Parallel, delayed
 from data.data_class_mar import PVTrainDataSetMARTorch
 from methods.original_deepgmm_baseline import OriginalDeepGMMBaseline
 from methods.pci_deepgmm_method import PCIDeepGMMMethod
-from methods.toy_model_selection_method import ToyModelSelectionMethod
-from scenarios.abstract_scenario import AbstractScenario
+from methods.toy_model_modified_deepgmm_method import ToyModelModifiedDeepGMMMethod
 from scenarios.demand_scenario import DemandScenario
+from scenarios.toy_scenarios import AGMMZoo
+
+
+# ── Deterministic-threshold MAR mechanism for toy DGP (W = x) ─────────────────
+# Mirrors run_pci_compare_toy.py:_make_delta_w. L+ = (A, Z, Y); standardise then
+# binary-search a threshold so (score <= τ).mean() == 1 - missing_rate.
+def _toy_make_delta_w(
+    x: np.ndarray, z: np.ndarray, y: np.ndarray,
+    missing_rate: float, mar_alpha_value: float = 1.6,
+) -> np.ndarray:
+    l_plus = np.concatenate([x, z, y], axis=1)
+    l_tilde = (l_plus - l_plus.mean(0, keepdims=True)) / (l_plus.std(0, keepdims=True) + 1e-8)
+    alpha = np.full(l_tilde.shape[1], mar_alpha_value, dtype=np.float64)
+    score = l_tilde @ alpha
+    target_obs = 1.0 - missing_rate
+    lo, hi = float(score.min()) - 1.0, float(score.max()) + 1.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if (score <= mid).mean() > target_obs:
+            hi = mid
+        else:
+            lo = mid
+    threshold = 0.5 * (lo + hi)
+    return (score <= threshold).astype(np.float64).reshape(-1, 1)
 
 _DEFAULT_CONFIG_FILE = Path(__file__).parent / "configs" / "experiment_params.toml"
 
@@ -56,27 +79,55 @@ def _one_rep(
     results = []
     diagnostics = []  # per-epoch rows
 
-    # Five canonical roles (validation protocol §5):
-    #   B       = original DeepGMM, naive on observed-only subsample (lower bound, demand)
-    #   O_orig  = original DeepGMM on full data (upper bound, demand)
-    #   O_mar   = MAR-DeepGMM on full data (upper bound, demand, sanity)
-    #   M       = MAR-DeepGMM on partial data, MAR (the thing under test, demand)
-    #   toy_sin = original DeepGMM on toy sin IV scenario (control, machinery health)
+    # Eight canonical runs per rep — same four roles on each of two DGPs.
     # Tuple shape: (label, dgp, scenario_arg, impl, internal_mode)
+    #
+    # Demand DGP: stochastic logistic-MAR on outcome_proxy, applied inside
+    # DemandScenario.generate_data via mar_modified / mar_naive scenario modes.
+    #   B      → OriginalDeepGMMBaseline(naive)  on scenario.mar_naive
+    #   O_orig → OriginalDeepGMMBaseline(oracle) on scenario.oracle (full data)
+    #   O_mar  → PCIDeepGMMMethod(oracle)        on scenario.oracle (full data)
+    #   M      → PCIDeepGMMMethod(modified)      on scenario.mar_modified
+    #
+    # Toy `sin` DGP: AGMMZoo(g_function="sin"); W := x (treatment), so
+    # `outcome_proxy = treatment` in the PCI mapping. Deterministic-threshold
+    # MAR on L+ = (A, Z, Y) computed once per rep and shared across all four
+    # toy modes (paired comparison).
+    #   B / O_orig         → ToyModelSelectionMethod (subset / full)
+    #   O_mar / M          → PCIDeepGMMMethod (oracle / modified) with W = x
+    # Dispatched through ToyModelModifiedDeepGMMMethod.
     MODES = [
-        ("B",       "demand",  "mar_naive",    "original", "naive"),
-        ("O_orig",  "demand",  "oracle",       "original", "oracle"),
-        ("O_mar",   "demand",  "oracle",       "pci",      "oracle"),
-        ("M",       "demand",  "mar_modified", "pci",      "modified"),
-        ("toy_sin", "toy_sin", "sin",          "toy",      None),
+        ("B",      "demand",  "mar_naive",    "original", "naive"),
+        ("O_orig", "demand",  "oracle",       "original", "oracle"),
+        ("O_mar",  "demand",  "oracle",       "pci",      "oracle"),
+        ("M",      "demand",  "mar_modified", "pci",      "modified"),
+        ("B",      "toy_sin", "sin",          "toy",      "naive"),
+        ("O_orig", "toy_sin", "sin",          "toy",      "oracle"),
+        ("O_mar",  "toy_sin", "sin",          "toy",      "oracle_mar"),
+        ("M",      "toy_sin", "sin",          "toy",      "modified"),
     ]
 
-    NAN = float("nan")
+    # ── pre-generate toy DGP data once per rep (shared across 4 toy modes) ───
+    np.random.seed(seed); torch.manual_seed(seed)
+    toy_scenario = AGMMZoo(g_function="sin")
+    x_tr, z_tr, y_tr, _g_tr, _ = toy_scenario.generate_data(n_train)
+    np.random.seed(seed + 1); torch.manual_seed(seed + 1)
+    x_dv, z_dv, y_dv, _g_dv, _ = toy_scenario.generate_data(n_dev)
+    dw_tr = _toy_make_delta_w(x_tr, z_tr, y_tr, missing_rate)
+    dw_dv = _toy_make_delta_w(x_dv, z_dv, y_dv, missing_rate)
+    toy_a1, toy_a0 = 1.0, -1.0
+    toy_ate_true = float(
+        toy_scenario._true_g_function_np(np.array([[toy_a1]])).flat[0]
+        - toy_scenario._true_g_function_np(np.array([[toy_a0]])).flat[0]
+    )
+
+    def _t(a: np.ndarray) -> torch.Tensor:
+        return torch.as_tensor(a, dtype=torch.float64)
+    toy_x_tr_t, toy_z_tr_t, toy_y_tr_t, toy_dw_tr_t = _t(x_tr), _t(z_tr), _t(y_tr), _t(dw_tr)
+    toy_x_dv_t, toy_z_dv_t, toy_y_dv_t, toy_dw_dv_t = _t(x_dv), _t(z_dv), _t(y_dv), _t(dw_dv)
 
     for label, dgp, scenario_arg, impl, internal_mode in MODES:
-        # ── load data per DGP ─────────────────────────────────────────────────
-        train_data = dev_data = ate_true = a1 = a0 = None
-        train_t = dev_t = test_t = None
+        # ── load / select data per DGP ────────────────────────────────────────
         if dgp == "demand":
             scenario = DemandScenario(mode=scenario_arg)
             scenario.setup(num_train=n_train, num_dev=n_dev, num_test=10,
@@ -88,19 +139,12 @@ def _one_rep(
             a1 = float(test.treatment_grid[0, 0])
             a0 = float(test.treatment_grid[-1, 0])
         elif dgp == "toy_sin":
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-            scenario_toy = AbstractScenario(filename=f"data/zoo/{scenario_arg}.npz")
-            scenario_toy.to_tensor()
-            train_t = scenario_toy.get_dataset("train")
-            dev_t   = scenario_toy.get_dataset("dev")
-            test_t  = scenario_toy.get_dataset("test")
+            ate_true = toy_ate_true
+            a1, a0 = toy_a1, toy_a0
         else:
             raise ValueError(f"Unknown dgp: {dgp}")
 
         # ── dispatch method ───────────────────────────────────────────────────
-        ate_hat = beta_a1 = beta_a0 = bias = mse = None
-        best_ckpt_epoch = -1
         loss_history: List = []
         dev_moment_history: List = []
 
@@ -118,7 +162,6 @@ def _one_rep(
             ate_hat = float(method.predict_ate(a1, a0))
             beta_a1 = float(method.beta_hat(a1))
             beta_a0 = float(method.beta_hat(a0))
-            bias = ate_hat - ate_true
             loss_history = method.loss_history
             dev_moment_history = method.dev_moment_history
             best_ckpt_epoch = method.best_checkpoint_epoch
@@ -135,17 +178,27 @@ def _one_rep(
             ate_hat = float(method.predict_ate(a1, a0))
             beta_a1 = float(method.beta_hat(a1))
             beta_a0 = float(method.beta_hat(a0))
-            bias = ate_hat - ate_true
             loss_history = method.learner.loss_history
             dev_moment_history = method.learner.dev_moment_history
             best_ckpt_epoch = method.learner.best_checkpoint_epoch
         elif impl == "toy":
-            method = ToyModelSelectionMethod(enable_cuda=use_cuda)
-            method.fit(train_t.x, train_t.z, train_t.y,
-                       dev_t.x, dev_t.z, dev_t.y,
-                       g_dev=dev_t.g, verbose=False)
-            g_pred = method.predict(test_t.x)
-            mse = float(((g_pred - test_t.g) ** 2).mean())
+            method = ToyModelModifiedDeepGMMMethod(
+                mode=internal_mode,
+                n_folds=n_folds,
+                missing_rate=missing_rate,
+                enable_cuda=use_cuda,
+                max_num_epochs=max_num_epochs,
+                batch_size=batch_size,
+            )
+            method.fit(toy_x_tr_t, toy_z_tr_t, toy_y_tr_t, toy_dw_tr_t,
+                       toy_x_dv_t, toy_z_dv_t, toy_y_dv_t, toy_dw_dv_t,
+                       verbose=False)
+            ate_hat = float(method.predict_ate(a1, a0))
+            beta_a1 = float(method.beta_hat(a1))
+            beta_a0 = float(method.beta_hat(a0))
+            loss_history = method.loss_history
+            dev_moment_history = method.dev_moment_history
+            best_ckpt_epoch = method.best_checkpoint_epoch
         else:
             raise ValueError(f"Unknown impl: {impl}")
 
@@ -153,23 +206,25 @@ def _one_rep(
             "rep": seed,
             "method": label,
             "dgp": dgp,
-            "ate_hat":  ate_hat  if ate_hat  is not None else NAN,
-            "ate_true": ate_true if ate_true is not None else NAN,
-            "bias":     bias     if bias     is not None else NAN,
-            "beta_a1":  beta_a1  if beta_a1  is not None else NAN,
-            "beta_a0":  beta_a0  if beta_a0  is not None else NAN,
-            "mse":      mse      if mse      is not None else NAN,
+            "ate_hat":  ate_hat,
+            "ate_true": ate_true,
+            "bias":     ate_hat - ate_true,
+            "beta_a1":  beta_a1,
+            "beta_a0":  beta_a0,
             "best_checkpoint_epoch": best_ckpt_epoch,
         })
 
-        # per-epoch loss curve — only for impls that expose loss_history
-        if impl in {"original", "pci"}:
+        # per-epoch loss curve (loss_history is empty for toy oracle/naive,
+        # populated for everything else — including toy oracle_mar / modified
+        # via the underlying PCIDeepGMMMethod)
+        if loss_history:
             dev_moment_dict = dict(dev_moment_history)
             for epoch, (h_loss, f_loss) in enumerate(loss_history):
                 dev_moment = dev_moment_dict.get(epoch, float("nan"))
                 diagnostics.append({
                     "rep": seed,
                     "method": label,
+                    "dgp": dgp,
                     "epoch": epoch,
                     "h_loss": h_loss,
                     "f_loss": f_loss,
@@ -282,45 +337,30 @@ def main() -> None:
         os.path.join(out_dir, "results.csv"),
         results,
         header=["rep", "method", "dgp", "ate_hat", "ate_true", "bias",
-                "beta_a1", "beta_a0", "mse", "best_checkpoint_epoch"],
+                "beta_a1", "beta_a0", "best_checkpoint_epoch"],
     )
     _write_csv(
         os.path.join(out_dir, "diagnostics.csv"),
         diagnostics,
-        header=["rep", "method", "epoch", "h_loss", "f_loss", "dev_moment"],
+        header=["rep", "method", "dgp", "epoch", "h_loss", "f_loss", "dev_moment"],
     )
 
     summary = []
-    for method in sorted({row["method"] for row in results}):
-        method_rows = [row for row in results if row["method"] == method]
-        dgp = method_rows[0]["dgp"]
-        if dgp == "demand":
-            biases = np.asarray([row["bias"] for row in method_rows])
-            summary.append({
-                "method":    method,
-                "dgp":       dgp,
-                "mean_bias": float(np.mean(biases)),
-                "std_bias":  float(np.std(biases)),
-                "rmse_bias": float(np.sqrt(np.mean(biases ** 2))),
-                "mean_mse":  float("nan"),
-                "std_mse":   float("nan"),
-            })
-        else:  # toy_sin or any non-demand control
-            mses = np.asarray([row["mse"] for row in method_rows])
-            summary.append({
-                "method":    method,
-                "dgp":       dgp,
-                "mean_bias": float("nan"),
-                "std_bias":  float("nan"),
-                "rmse_bias": float("nan"),
-                "mean_mse":  float(np.mean(mses)),
-                "std_mse":   float(np.std(mses)),
-            })
+    method_dgp_pairs = sorted({(row["method"], row["dgp"]) for row in results})
+    for method, dgp in method_dgp_pairs:
+        biases = np.asarray([row["bias"] for row in results
+                             if row["method"] == method and row["dgp"] == dgp])
+        summary.append({
+            "method":    method,
+            "dgp":       dgp,
+            "mean_bias": float(np.mean(biases)),
+            "std_bias":  float(np.std(biases)),
+            "rmse":      float(np.sqrt(np.mean(biases ** 2))),
+        })
     _write_csv(
         os.path.join(out_dir, "summary.csv"),
         summary,
-        header=["method", "dgp", "mean_bias", "std_bias", "rmse_bias",
-                "mean_mse", "std_mse"],
+        header=["method", "dgp", "mean_bias", "std_bias", "rmse"],
     )
 
     _color_map = {
@@ -329,86 +369,78 @@ def main() -> None:
         "O_mar":  "#4C72B0",
         "M":      "#B221E2",
     }
-    # Bias distribution: demand-DGP rows only (toy_sin has no ATE bias)
-    demand_results = [row for row in results if row["dgp"] == "demand"]
-    if demand_results:
+    # Bias distribution: one panel per DGP (scales differ markedly between
+    # demand and toy_sin so a single overlay would compress the toy panel).
+    dgps_seen = sorted({row["dgp"] for row in results})
+    if dgps_seen:
         plt.style.use("ggplot")
-        fig, ax = plt.subplots(figsize=(9, 5.6))
-        all_bias_vals = np.concatenate([
-            np.asarray([row["bias"] for row in demand_results if row["method"] == m])
-            for m in sorted({row["method"] for row in demand_results})
-        ])
-        _pad = 0.1 * max(1e-8, float(all_bias_vals.max()) - float(all_bias_vals.min()))
-        x_grid = np.linspace(float(all_bias_vals.min()) - _pad,
-                             float(all_bias_vals.max()) + _pad, 500)
-        for method in sorted({row["method"] for row in demand_results}):
-            biases = np.asarray([row["bias"] for row in demand_results if row["method"] == method])
-            color = _color_map.get(method)
-            ax.hist(biases, bins=18, density=True, alpha=0.22,
-                    edgecolor=color, linewidth=1.6, color=color, label=method)
-            if biases.size >= 2 and np.std(biases) > 0:
-                ax.plot(x_grid, gaussian_kde(biases)(x_grid), color=color, linewidth=2.0)
-        ax.axvline(0.0, color="black", linestyle="--", linewidth=1.2)
-        ax.set_title(f"Demand DGP — Bias = ATE_hat - ATE_true  (missing_rate={missing_rate})")
-        ax.set_xlabel("Bias")
-        ax.set_ylabel("Density")
-        ax.legend(title="Method")
+        fig, axes = plt.subplots(len(dgps_seen), 1,
+                                 figsize=(9, 4.5 * len(dgps_seen)), squeeze=False)
+        for di, dgp in enumerate(dgps_seen):
+            ax = axes[di][0]
+            dgp_rows = [row for row in results if row["dgp"] == dgp]
+            methods_in_dgp = sorted({row["method"] for row in dgp_rows})
+            all_bias_vals = np.concatenate([
+                np.asarray([row["bias"] for row in dgp_rows if row["method"] == m])
+                for m in methods_in_dgp
+            ])
+            _pad = 0.1 * max(1e-8, float(all_bias_vals.max()) - float(all_bias_vals.min()))
+            x_grid = np.linspace(float(all_bias_vals.min()) - _pad,
+                                 float(all_bias_vals.max()) + _pad, 500)
+            for method in methods_in_dgp:
+                biases = np.asarray([row["bias"] for row in dgp_rows
+                                     if row["method"] == method])
+                color = _color_map.get(method)
+                ax.hist(biases, bins=18, density=True, alpha=0.22,
+                        edgecolor=color, linewidth=1.6, color=color, label=method)
+                if biases.size >= 2 and np.std(biases) > 0:
+                    ax.plot(x_grid, gaussian_kde(biases)(x_grid),
+                            color=color, linewidth=2.0)
+            ax.axvline(0.0, color="black", linestyle="--", linewidth=1.2)
+            ax.set_title(f"{dgp} — Bias = ATE_hat - ATE_true  "
+                         f"(missing_rate={missing_rate})")
+            ax.set_xlabel("Bias")
+            ax.set_ylabel("Density")
+            ax.legend(title="Method")
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, "bias_distribution.png"), dpi=160)
         plt.close(fig)
         plt.style.use("default")
 
-    # MSE distribution: toy_sin (and any other non-demand control)
-    toy_results = [row for row in results if row["dgp"] != "demand"]
-    if toy_results and len({row["mse"] for row in toy_results}) > 1:
-        plt.style.use("ggplot")
-        fig, ax = plt.subplots(figsize=(9, 4.5))
-        for method in sorted({row["method"] for row in toy_results}):
-            mses = np.asarray([row["mse"] for row in toy_results if row["method"] == method])
-            ax.hist(mses, bins=18, density=True, alpha=0.4, label=method)
-        ax.set_title("Toy DGP — Test MSE on g")
-        ax.set_xlabel("MSE")
-        ax.set_ylabel("Density")
-        ax.legend(title="Method")
-        fig.tight_layout()
-        fig.savefig(os.path.join(out_dir, "toy_mse_distribution.png"), dpi=160)
-        plt.close(fig)
-        plt.style.use("default")
-
     # ── loss-curve and dev-moment plots (median ± IQR across reps) ───────────
-    methods_seen = sorted({row["method"] for row in diagnostics})
-    fig, axes = plt.subplots(len(methods_seen), 2,
-                             figsize=(12, 4 * len(methods_seen)), squeeze=False)
-    for mi, method in enumerate(methods_seen):
-        rows = [r for r in diagnostics if r["method"] == method]
-        epochs = sorted({r["epoch"] for r in rows})
+    method_dgp_pairs_seen = sorted({(r["method"], r["dgp"]) for r in diagnostics})
+    if method_dgp_pairs_seen:
+        fig, axes = plt.subplots(len(method_dgp_pairs_seen), 2,
+                                 figsize=(12, 4 * len(method_dgp_pairs_seen)),
+                                 squeeze=False)
+        for mi, (method, dgp) in enumerate(method_dgp_pairs_seen):
+            rows = [r for r in diagnostics if r["method"] == method and r["dgp"] == dgp]
+            epochs = sorted({r["epoch"] for r in rows})
 
-        # h_loss per epoch
-        h_losses = np.array([[r["h_loss"] for r in rows if r["epoch"] == e] for e in epochs])
-        ax = axes[mi][0]
-        ax.plot(epochs, np.median(h_losses, axis=1), label="h_loss median")
-        q25, q75 = np.percentile(h_losses, 25, axis=1), np.percentile(h_losses, 75, axis=1)
-        ax.fill_between(epochs, q25, q75, alpha=0.2)
-        ax.set_title(f"{method} — h_loss")
-        ax.set_xlabel("epoch"); ax.set_ylabel("h_loss")
+            h_losses = np.array([[r["h_loss"] for r in rows if r["epoch"] == e] for e in epochs])
+            ax = axes[mi][0]
+            ax.plot(epochs, np.median(h_losses, axis=1), label="h_loss median")
+            q25, q75 = np.percentile(h_losses, 25, axis=1), np.percentile(h_losses, 75, axis=1)
+            ax.fill_between(epochs, q25, q75, alpha=0.2)
+            ax.set_title(f"{dgp} / {method} — h_loss")
+            ax.set_xlabel("epoch"); ax.set_ylabel("h_loss")
 
-        # dev_moment (only non-nan rows)
-        dm_rows = [r for r in rows if not np.isnan(r["dev_moment"])]
-        if dm_rows:
-            dm_epochs = sorted({r["epoch"] for r in dm_rows})
-            dm_vals = np.array([[r["dev_moment"] for r in dm_rows if r["epoch"] == e]
-                                for e in dm_epochs])
-            ax2 = axes[mi][1]
-            ax2.plot(dm_epochs, np.median(dm_vals, axis=1), label="dev_moment median", color="orange")
-            q25d = np.percentile(dm_vals, 25, axis=1)
-            q75d = np.percentile(dm_vals, 75, axis=1)
-            ax2.fill_between(dm_epochs, q25d, q75d, alpha=0.2, color="orange")
-            ax2.set_title(f"{method} — dev MSE")
-            ax2.set_xlabel("epoch"); ax2.set_ylabel("MSE")
+            dm_rows = [r for r in rows if not np.isnan(r["dev_moment"])]
+            if dm_rows:
+                dm_epochs = sorted({r["epoch"] for r in dm_rows})
+                dm_vals = np.array([[r["dev_moment"] for r in dm_rows if r["epoch"] == e]
+                                    for e in dm_epochs])
+                ax2 = axes[mi][1]
+                ax2.plot(dm_epochs, np.median(dm_vals, axis=1), label="dev_moment median", color="orange")
+                q25d = np.percentile(dm_vals, 25, axis=1)
+                q75d = np.percentile(dm_vals, 75, axis=1)
+                ax2.fill_between(dm_epochs, q25d, q75d, alpha=0.2, color="orange")
+                ax2.set_title(f"{dgp} / {method} — dev MSE")
+                ax2.set_xlabel("epoch"); ax2.set_ylabel("MSE")
 
-    fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "training_curves.png"), dpi=150)
-    plt.close(fig)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "training_curves.png"), dpi=150)
+        plt.close(fig)
 
     print(f"Saved outputs to: {out_dir}")
 

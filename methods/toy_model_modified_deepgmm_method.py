@@ -11,13 +11,17 @@ from methods.toy_model_selection_method import ToyModelSelectionMethod
 
 class ToyModelModifiedDeepGMMMethod:
     """
-    Unified oracle / naive / modified comparison on toy DGP data.
+    Unified four-role comparison on toy DGP data, mapping the validation
+    protocol's roles onto toy variables (W := x):
 
-    Oracle / naive  → ToyModelSelectionMethod (original DeepGMM pipeline).
-                      ToyModelSelectionMethod expects g: input_dim=1, f: input_dim=2,
-                      which matches the toy DGP directly (x scalar, z 2-D).
-    Modified        → PCIDeepGMMMethod with W = x as the outcome proxy (MAR mask
-                      applied).  h: input_dim=2 ([W, A]), f: input_dim=3 ([A, Z]).
+        oracle      → O_orig : ToyModelSelectionMethod on full data
+        naive       → B      : ToyModelSelectionMethod on observed-only subsample
+        oracle_mar  → O_mar  : PCIDeepGMMMethod (mode="oracle") with W = x
+        modified    → M      : PCIDeepGMMMethod (mode="modified") with W = x, MAR mask
+
+    ToyModelSelectionMethod expects g: input_dim=1, f: input_dim=2 (matches toy
+    DGP directly: x scalar, z 2-D). PCIDeepGMMMethod expects h: input_dim=2
+    ([W, A]), f: input_dim=3 ([A, Z]) — same shape since W = x is also scalar.
 
     All fit() inputs are torch double tensors:
         x_train       (n, 1)  treatment
@@ -28,8 +32,8 @@ class ToyModelModifiedDeepGMMMethod:
     ATE estimation
     --------------
     Oracle / naive  : point evaluation  β̂(a) = g(a)          (single forward pass)
-    Modified        : cross-fit average β̂(a) = (1/n) Σ h(Wᵢ, a)
-    Both converge to g_true(a) if the estimator is consistent.
+    Oracle_mar / modified : cross-fit average β̂(a) = (1/n) Σ h(Wᵢ, a)
+    All four converge to g_true(a) if the estimator is consistent.
     """
 
     def __init__(
@@ -41,7 +45,7 @@ class ToyModelModifiedDeepGMMMethod:
         max_num_epochs: int = 300,
         batch_size: int = 256,
     ):
-        if mode not in {"oracle", "naive", "modified"}:
+        if mode not in {"oracle", "naive", "oracle_mar", "modified"}:
             raise ValueError(f"Unsupported mode: {mode}")
         self.mode = mode
         self.n_folds = n_folds
@@ -88,7 +92,7 @@ class ToyModelModifiedDeepGMMMethod:
                 x_train, z_train, y_train, delta_w_train,
                 x_dev, z_dev, y_dev, delta_w_dev, verbose,
             )
-        else:
+        else:  # oracle_mar or modified
             self._fit_pci(
                 x_train, z_train, y_train, delta_w_train,
                 x_dev, z_dev, y_dev, delta_w_dev, verbose,
@@ -122,10 +126,14 @@ class ToyModelModifiedDeepGMMMethod:
         x_train, z_train, y_train, delta_w_train,
         x_dev, z_dev, y_dev, delta_w_dev, verbose,
     ) -> None:
-        # Outcome proxy W = x (treatment); zero-fill for missing units
+        # Outcome proxy W = x (treatment).
+        # For "modified", zero-fill missing units (PCI imputation will fill them).
+        # For "oracle_mar", keep the full W; PCIDeepGMMMethod(mode="oracle") will
+        # internally force delta_w = 1 so the imputation models are never queried.
         obs_mask = self._obs_mask(delta_w_train)
         w_train = x_train.clone()
-        w_train[~obs_mask] = 0.0
+        if self.mode == "modified":
+            w_train[~obs_mask] = 0.0
 
         train_data = PVTrainDataSetMARTorch(
             treatment=x_train,
@@ -140,7 +148,8 @@ class ToyModelModifiedDeepGMMMethod:
         if x_dev is not None:
             w_dev = x_dev.clone()
             dw_dev = delta_w_dev if delta_w_dev is not None else torch.ones_like(x_dev)
-            w_dev[~self._obs_mask(dw_dev)] = 0.0
+            if self.mode == "modified":
+                w_dev[~self._obs_mask(dw_dev)] = 0.0
             dev_data = PVTrainDataSetMARTorch(
                 treatment=x_dev,
                 treatment_proxy=z_dev,
@@ -150,8 +159,9 @@ class ToyModelModifiedDeepGMMMethod:
                 delta_w=dw_dev,
             )
 
+        pci_internal_mode = "oracle" if self.mode == "oracle_mar" else "modified"
         pci = PCIDeepGMMMethod(
-            mode="modified",
+            mode=pci_internal_mode,
             n_folds=self.n_folds,
             missing_rate=self.missing_rate,
             enable_cuda=self.enable_cuda,
@@ -178,7 +188,7 @@ class ToyModelModifiedDeepGMMMethod:
             with torch.no_grad():
                 pred = self._toy_method.predict(x_test)
             return float(pred.mean())
-        else:
+        else:  # oracle_mar or modified
             if self._pci_method is None:
                 raise AttributeError("fit must be called before beta_hat")
             return self._pci_method.beta_hat(a_value)
