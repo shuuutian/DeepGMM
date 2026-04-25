@@ -7,7 +7,6 @@
 #SBATCH --output=logs/%j.out
 
 module load python/3.10
-source ~/venv/bin/activate
 cd /home/wzzho2/DeepGMM
-python run_pci_compare.py --n-rep 100 --missing-rate 0.3 --num-cpus 8
+uv run python run_pci_compare.py --config compare --n-rep 100 --missing-rate 0.3 --num-cpus 8
 

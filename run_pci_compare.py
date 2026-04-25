@@ -13,12 +13,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 from scipy.stats import gaussian_kde
 from joblib import Parallel, delayed
 
 from data.data_class_mar import PVTrainDataSetMARTorch
 from methods.original_deepgmm_baseline import OriginalDeepGMMBaseline
 from methods.pci_deepgmm_method import PCIDeepGMMMethod
+from methods.toy_model_selection_method import ToyModelSelectionMethod
+from scenarios.abstract_scenario import AbstractScenario
 from scenarios.demand_scenario import DemandScenario
 
 _DEFAULT_CONFIG_FILE = Path(__file__).parent / "configs" / "experiment_params.toml"
@@ -53,29 +56,53 @@ def _one_rep(
     results = []
     diagnostics = []  # per-epoch rows
 
-    # Four canonical roles (validation protocol §5):
-    #   B      = original DeepGMM, naive on observed-only subsample (lower bound)
-    #   O_orig = original DeepGMM on full data (upper bound)
-    #   O_mar  = MAR-DeepGMM on full data (upper bound, sanity)
-    #   M      = MAR-DeepGMM on partial data, MAR (the thing under test)
-    # Tuple shape: (label, scenario_mode, impl, internal_mode)
+    # Five canonical roles (validation protocol §5):
+    #   B       = original DeepGMM, naive on observed-only subsample (lower bound, demand)
+    #   O_orig  = original DeepGMM on full data (upper bound, demand)
+    #   O_mar   = MAR-DeepGMM on full data (upper bound, demand, sanity)
+    #   M       = MAR-DeepGMM on partial data, MAR (the thing under test, demand)
+    #   toy_sin = original DeepGMM on toy sin IV scenario (control, machinery health)
+    # Tuple shape: (label, dgp, scenario_arg, impl, internal_mode)
     MODES = [
-        ("B",      "mar_naive",    "original", "naive"),
-        ("O_orig", "oracle",       "original", "oracle"),
-        ("O_mar",  "oracle",       "pci",      "oracle"),
-        ("M",      "mar_modified", "pci",      "modified"),
+        ("B",       "demand",  "mar_naive",    "original", "naive"),
+        ("O_orig",  "demand",  "oracle",       "original", "oracle"),
+        ("O_mar",   "demand",  "oracle",       "pci",      "oracle"),
+        ("M",       "demand",  "mar_modified", "pci",      "modified"),
+        ("toy_sin", "toy_sin", "sin",          "toy",      None),
     ]
 
-    for label, scenario_mode, impl, internal_mode in MODES:
-        scenario = DemandScenario(mode=scenario_mode)
-        scenario.setup(num_train=n_train, num_dev=n_dev, num_test=10,
-                       missing_rate=missing_rate, seed=seed)
-        train_data = PVTrainDataSetMARTorch.from_numpy(scenario.get_train_data())
-        dev_data   = PVTrainDataSetMARTorch.from_numpy(scenario.get_dev_data())
-        test       = scenario.get_test_data()
-        ate_true   = float(test.structural_outcome[0, 0] - test.structural_outcome[-1, 0])
-        a1 = float(test.treatment_grid[0, 0])
-        a0 = float(test.treatment_grid[-1, 0])
+    NAN = float("nan")
+
+    for label, dgp, scenario_arg, impl, internal_mode in MODES:
+        # ── load data per DGP ─────────────────────────────────────────────────
+        train_data = dev_data = ate_true = a1 = a0 = None
+        train_t = dev_t = test_t = None
+        if dgp == "demand":
+            scenario = DemandScenario(mode=scenario_arg)
+            scenario.setup(num_train=n_train, num_dev=n_dev, num_test=10,
+                           missing_rate=missing_rate, seed=seed)
+            train_data = PVTrainDataSetMARTorch.from_numpy(scenario.get_train_data())
+            dev_data   = PVTrainDataSetMARTorch.from_numpy(scenario.get_dev_data())
+            test       = scenario.get_test_data()
+            ate_true   = float(test.structural_outcome[0, 0] - test.structural_outcome[-1, 0])
+            a1 = float(test.treatment_grid[0, 0])
+            a0 = float(test.treatment_grid[-1, 0])
+        elif dgp == "toy_sin":
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            scenario_toy = AbstractScenario(filename=f"data/zoo/{scenario_arg}.npz")
+            scenario_toy.to_tensor()
+            train_t = scenario_toy.get_dataset("train")
+            dev_t   = scenario_toy.get_dataset("dev")
+            test_t  = scenario_toy.get_dataset("test")
+        else:
+            raise ValueError(f"Unknown dgp: {dgp}")
+
+        # ── dispatch method ───────────────────────────────────────────────────
+        ate_hat = beta_a1 = beta_a0 = bias = mse = None
+        best_ckpt_epoch = -1
+        loss_history: List = []
+        dev_moment_history: List = []
 
         if impl == "original":
             method = OriginalDeepGMMBaseline(
@@ -88,13 +115,14 @@ def _one_rep(
                 enable_cuda=use_cuda,
             )
             method.fit(train_data, dev_data, verbose=False)
-            ate_hat = method.predict_ate(a1, a0)
-            beta_a1 = method.beta_hat(a1)
-            beta_a0 = method.beta_hat(a0)
+            ate_hat = float(method.predict_ate(a1, a0))
+            beta_a1 = float(method.beta_hat(a1))
+            beta_a0 = float(method.beta_hat(a0))
+            bias = ate_hat - ate_true
             loss_history = method.loss_history
             dev_moment_history = method.dev_moment_history
             best_ckpt_epoch = method.best_checkpoint_epoch
-        else:
+        elif impl == "pci":
             method = PCIDeepGMMMethod(
                 mode=internal_mode,
                 n_folds=n_folds,
@@ -104,36 +132,49 @@ def _one_rep(
                 batch_size=batch_size,
             )
             method.fit(train_data, dev_data, verbose=False)
-            ate_hat = method.predict_ate(a1, a0)
-            beta_a1 = method.beta_hat(a1)
-            beta_a0 = method.beta_hat(a0)
+            ate_hat = float(method.predict_ate(a1, a0))
+            beta_a1 = float(method.beta_hat(a1))
+            beta_a0 = float(method.beta_hat(a0))
+            bias = ate_hat - ate_true
             loss_history = method.learner.loss_history
             dev_moment_history = method.learner.dev_moment_history
             best_ckpt_epoch = method.learner.best_checkpoint_epoch
+        elif impl == "toy":
+            method = ToyModelSelectionMethod(enable_cuda=use_cuda)
+            method.fit(train_t.x, train_t.z, train_t.y,
+                       dev_t.x, dev_t.z, dev_t.y,
+                       g_dev=dev_t.g, verbose=False)
+            g_pred = method.predict(test_t.x)
+            mse = float(((g_pred - test_t.g) ** 2).mean())
+        else:
+            raise ValueError(f"Unknown impl: {impl}")
 
         results.append({
             "rep": seed,
             "method": label,
-            "ate_hat": float(ate_hat),
-            "ate_true": ate_true,
-            "bias": float(ate_hat - ate_true),
-            "beta_a1": float(beta_a1),
-            "beta_a0": float(beta_a0),
+            "dgp": dgp,
+            "ate_hat":  ate_hat  if ate_hat  is not None else NAN,
+            "ate_true": ate_true if ate_true is not None else NAN,
+            "bias":     bias     if bias     is not None else NAN,
+            "beta_a1":  beta_a1  if beta_a1  is not None else NAN,
+            "beta_a0":  beta_a0  if beta_a0  is not None else NAN,
+            "mse":      mse      if mse      is not None else NAN,
             "best_checkpoint_epoch": best_ckpt_epoch,
         })
 
-        # per-epoch loss curve
-        dev_moment_dict = dict(dev_moment_history)
-        for epoch, (h_loss, f_loss) in enumerate(loss_history):
-            dev_moment = dev_moment_dict.get(epoch, float("nan"))
-            diagnostics.append({
-                "rep": seed,
-                "method": label,
-                "epoch": epoch,
-                "h_loss": h_loss,
-                "f_loss": f_loss,
-                "dev_moment": dev_moment,
-            })
+        # per-epoch loss curve — only for impls that expose loss_history
+        if impl in {"original", "pci"}:
+            dev_moment_dict = dict(dev_moment_history)
+            for epoch, (h_loss, f_loss) in enumerate(loss_history):
+                dev_moment = dev_moment_dict.get(epoch, float("nan"))
+                diagnostics.append({
+                    "rep": seed,
+                    "method": label,
+                    "epoch": epoch,
+                    "h_loss": h_loss,
+                    "f_loss": f_loss,
+                    "dev_moment": dev_moment,
+                })
 
     return {"results": results, "diagnostics": diagnostics}
 
@@ -240,8 +281,8 @@ def main() -> None:
     _write_csv(
         os.path.join(out_dir, "results.csv"),
         results,
-        header=["rep", "method", "ate_hat", "ate_true", "bias",
-                "beta_a1", "beta_a0", "best_checkpoint_epoch"],
+        header=["rep", "method", "dgp", "ate_hat", "ate_true", "bias",
+                "beta_a1", "beta_a0", "mse", "best_checkpoint_epoch"],
     )
     _write_csv(
         os.path.join(out_dir, "diagnostics.csv"),
@@ -251,17 +292,35 @@ def main() -> None:
 
     summary = []
     for method in sorted({row["method"] for row in results}):
-        biases = np.asarray([row["bias"] for row in results if row["method"] == method])
-        summary.append({
-            "method":    method,
-            "mean_bias": float(np.mean(biases)),
-            "std_bias":  float(np.std(biases)),
-            "rmse":      float(np.sqrt(np.mean(biases ** 2))),
-        })
+        method_rows = [row for row in results if row["method"] == method]
+        dgp = method_rows[0]["dgp"]
+        if dgp == "demand":
+            biases = np.asarray([row["bias"] for row in method_rows])
+            summary.append({
+                "method":    method,
+                "dgp":       dgp,
+                "mean_bias": float(np.mean(biases)),
+                "std_bias":  float(np.std(biases)),
+                "rmse_bias": float(np.sqrt(np.mean(biases ** 2))),
+                "mean_mse":  float("nan"),
+                "std_mse":   float("nan"),
+            })
+        else:  # toy_sin or any non-demand control
+            mses = np.asarray([row["mse"] for row in method_rows])
+            summary.append({
+                "method":    method,
+                "dgp":       dgp,
+                "mean_bias": float("nan"),
+                "std_bias":  float("nan"),
+                "rmse_bias": float("nan"),
+                "mean_mse":  float(np.mean(mses)),
+                "std_mse":   float(np.std(mses)),
+            })
     _write_csv(
         os.path.join(out_dir, "summary.csv"),
         summary,
-        header=["method", "mean_bias", "std_bias", "rmse"],
+        header=["method", "dgp", "mean_bias", "std_bias", "rmse_bias",
+                "mean_mse", "std_mse"],
     )
 
     _color_map = {
@@ -270,31 +329,51 @@ def main() -> None:
         "O_mar":  "#4C72B0",
         "M":      "#B221E2",
     }
-    plt.style.use("ggplot")
-    fig, ax = plt.subplots(figsize=(9, 5.6))
-    all_bias_vals = np.concatenate([
-        np.asarray([row["bias"] for row in results if row["method"] == m])
-        for m in sorted({row["method"] for row in results})
-    ])
-    _pad = 0.1 * max(1e-8, float(all_bias_vals.max()) - float(all_bias_vals.min()))
-    x_grid = np.linspace(float(all_bias_vals.min()) - _pad,
-                         float(all_bias_vals.max()) + _pad, 500)
-    for method in sorted({row["method"] for row in results}):
-        biases = np.asarray([row["bias"] for row in results if row["method"] == method])
-        color = _color_map.get(method)
-        ax.hist(biases, bins=18, density=True, alpha=0.22,
-                edgecolor=color, linewidth=1.6, color=color, label=method)
-        if biases.size >= 2 and np.std(biases) > 0:
-            ax.plot(x_grid, gaussian_kde(biases)(x_grid), color=color, linewidth=2.0)
-    ax.axvline(0.0, color="black", linestyle="--", linewidth=1.2)
-    ax.set_title(f"Bias = ATE_hat - ATE_true  (missing_rate={missing_rate})")
-    ax.set_xlabel("Bias")
-    ax.set_ylabel("Density")
-    ax.legend(title="Method")
-    fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "bias_distribution.png"), dpi=160)
-    plt.close(fig)
-    plt.style.use("default")
+    # Bias distribution: demand-DGP rows only (toy_sin has no ATE bias)
+    demand_results = [row for row in results if row["dgp"] == "demand"]
+    if demand_results:
+        plt.style.use("ggplot")
+        fig, ax = plt.subplots(figsize=(9, 5.6))
+        all_bias_vals = np.concatenate([
+            np.asarray([row["bias"] for row in demand_results if row["method"] == m])
+            for m in sorted({row["method"] for row in demand_results})
+        ])
+        _pad = 0.1 * max(1e-8, float(all_bias_vals.max()) - float(all_bias_vals.min()))
+        x_grid = np.linspace(float(all_bias_vals.min()) - _pad,
+                             float(all_bias_vals.max()) + _pad, 500)
+        for method in sorted({row["method"] for row in demand_results}):
+            biases = np.asarray([row["bias"] for row in demand_results if row["method"] == method])
+            color = _color_map.get(method)
+            ax.hist(biases, bins=18, density=True, alpha=0.22,
+                    edgecolor=color, linewidth=1.6, color=color, label=method)
+            if biases.size >= 2 and np.std(biases) > 0:
+                ax.plot(x_grid, gaussian_kde(biases)(x_grid), color=color, linewidth=2.0)
+        ax.axvline(0.0, color="black", linestyle="--", linewidth=1.2)
+        ax.set_title(f"Demand DGP — Bias = ATE_hat - ATE_true  (missing_rate={missing_rate})")
+        ax.set_xlabel("Bias")
+        ax.set_ylabel("Density")
+        ax.legend(title="Method")
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "bias_distribution.png"), dpi=160)
+        plt.close(fig)
+        plt.style.use("default")
+
+    # MSE distribution: toy_sin (and any other non-demand control)
+    toy_results = [row for row in results if row["dgp"] != "demand"]
+    if toy_results and len({row["mse"] for row in toy_results}) > 1:
+        plt.style.use("ggplot")
+        fig, ax = plt.subplots(figsize=(9, 4.5))
+        for method in sorted({row["method"] for row in toy_results}):
+            mses = np.asarray([row["mse"] for row in toy_results if row["method"] == method])
+            ax.hist(mses, bins=18, density=True, alpha=0.4, label=method)
+        ax.set_title("Toy DGP — Test MSE on g")
+        ax.set_xlabel("MSE")
+        ax.set_ylabel("Density")
+        ax.legend(title="Method")
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "toy_mse_distribution.png"), dpi=160)
+        plt.close(fig)
+        plt.style.use("default")
 
     # ── loss-curve and dev-moment plots (median ± IQR across reps) ───────────
     methods_seen = sorted({row["method"] for row in diagnostics})
