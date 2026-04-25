@@ -16,11 +16,18 @@ We set:
     x  ←  concat(W, A)   input to h  [dim 2]  (raw, unnormalised)
     z  ←  concat(A, Z)   input to f  [dim 3]  (raw, unnormalised)
     y  ←  Y  (outcome)
+
+LR grid search
+--------------
+If lr_grid is provided (list of h_lr values), fit() runs a short
+selection phase for each entry (f_lr = 5 * h_lr, matching the toy
+baseline's ratio), picks the config with lowest dev MSE, then does
+a full training run with the winning config.
 """
 from __future__ import annotations
 
 import copy
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -47,17 +54,25 @@ class OriginalDeepGMMBaseline:
     - No cross-fitting imputation (no MAR correction)
     - Uses raw (unnormalised) inputs — same as PCIDeepGMMMethod
     - Saves h checkpoint at each eval and restores the best dev-set one
+
+    LR grid search (lr_grid parameter):
+    - If lr_grid=[lr1, lr2, ...], a selection phase of selection_epochs is run
+      for each h_lr (with f_lr = 5 * h_lr).  The config with lowest dev MSE
+      wins and is used for the full max_num_epochs training run.
+    - If lr_grid=None, a single run with h_lr / f_lr is used.
     """
 
     def __init__(
         self,
         mode: str = "oracle",
-        max_num_epochs: int = 1500,
-        batch_size: int = 256,
-        h_lr: float = 2e-4,
-        f_lr: float = 8e-4,
+        max_num_epochs: int = 6000,
+        batch_size: int = 1024,
+        h_lr: float = 5e-4,
+        f_lr: float = 2.5e-3,
+        lr_grid: Optional[List[float]] = None,
+        selection_epochs: int = 2000,
         eval_freq: int = 20,
-        burn_in: int = 200,
+        burn_in: int = 1000,
         enable_cuda: bool = False,
     ):
         if mode not in {"oracle", "naive"}:
@@ -67,6 +82,8 @@ class OriginalDeepGMMBaseline:
         self.batch_size = batch_size
         self.h_lr = h_lr
         self.f_lr = f_lr
+        self.lr_grid = lr_grid          # list of h_lr values; f_lr = 5 * h_lr each
+        self.selection_epochs = selection_epochs
         self.eval_freq = eval_freq
         self.burn_in = burn_in
         self.enable_cuda = enable_cuda
@@ -74,11 +91,9 @@ class OriginalDeepGMMBaseline:
         self.h: Optional[nn.Module] = None
         self.f: Optional[nn.Module] = None
         self._train_w: Optional[torch.Tensor] = None   # raw W (outcome_proxy) for beta_hat
-        self._h_pred_history: list = []                # Polyak snapshots
         self._best_h_state: Optional[dict] = None
         self._best_dev_loss: float = float("inf")
         self.loss_history: list = []
-        # diagnostics
         self.dev_moment_history: list = []   # list of (epoch, dev_moment)
         self.best_checkpoint_epoch: int = -1
 
@@ -98,65 +113,59 @@ class OriginalDeepGMMBaseline:
 
     # ── training utilities ───────────────────────────────────────────────────
 
-    def _dev_moment(self, x_dev: torch.Tensor, z_dev: torch.Tensor, y_dev: torch.Tensor) -> float:
-        """MSE on dev set — same criterion as SGDLearningPCI for comparability."""
-        self.h.eval()
-        with torch.no_grad():
-            residual = torch.squeeze(y_dev) - torch.squeeze(self.h(x_dev))
-            mse = float((residual ** 2).mean())
-        self.h.train()
-        return mse
-
-    def _snapshot(self, x_train: torch.Tensor) -> None:
-        """Record h(x) predictions on training set for Polyak averaging."""
-        self.h.eval()
-        with torch.no_grad():
-            pred = torch.squeeze(self.h(x_train)).detach().cpu()
-        self.h.train()
-        self._h_pred_history.append(pred)
-
-    # ── main fit ─────────────────────────────────────────────────────────────
-
-    def fit(
-        self,
-        train_data: PVTrainDataSetMARTorch,
-        dev_data: Optional[PVTrainDataSetMARTorch] = None,
-        verbose: bool = False,
-    ) -> None:
-        train_data = self._filter_data(train_data)
-        x_train, z_train = self._to_xz(train_data)
-        y_train = train_data.outcome
-
-        x_dev_t = z_dev_t = y_dev_t = None
-        if dev_data is not None:
-            dev_filtered = self._filter_data(dev_data)
-            x_dev_t, z_dev_t = self._to_xz(dev_filtered)
-            y_dev_t = dev_filtered.outcome
-        # store raw W for beta_hat
-        self._train_w = train_data.outcome_proxy.detach().cpu()
-
-        device = y_train.device
-        if self.enable_cuda and torch.cuda.is_available():
-            x_train = x_train.cuda(); z_train = z_train.cuda(); y_train = y_train.cuda()
-            if x_dev_t is not None:
-                x_dev_t = x_dev_t.cuda(); z_dev_t = z_dev_t.cuda(); y_dev_t = y_dev_t.cuda()
-
+    def _make_models(self, device: torch.device) -> Tuple[nn.Module, nn.Module]:
         h = MLPModel(input_dim=2, layer_widths=[64, 64], activation=nn.LeakyReLU).double()
         f = MLPModel(input_dim=3, layer_widths=[64, 64], activation=nn.LeakyReLU).double()
-        if self.enable_cuda and torch.cuda.is_available():
-            h = h.cuda(); f = f.cuda()
         h.initialize(); f.initialize()
+        return h.to(device), f.to(device)
 
-        h_opt = OptimizerFactory(OAdam, lr=self.h_lr, betas=(0.5, 0.9))(h)
-        f_opt = OptimizerFactory(OAdam, lr=self.f_lr, betas=(0.5, 0.9))(f)
+    def _dev_mse(self, h: nn.Module, x_dev: torch.Tensor, y_dev: torch.Tensor) -> float:
+        """MSE on dev set — same criterion as SGDLearningPCI for comparability."""
+        h.eval()
+        with torch.no_grad():
+            residual = torch.squeeze(y_dev) - torch.squeeze(h(x_dev))
+            mse = float((residual ** 2).mean())
+        h.train()
+        return mse
+
+    # ── single training run ──────────────────────────────────────────────────
+
+    def _train_one_config(
+        self,
+        x_train: torch.Tensor,
+        z_train: torch.Tensor,
+        y_train: torch.Tensor,
+        x_dev: Optional[torch.Tensor],
+        y_dev: Optional[torch.Tensor],
+        h_lr: float,
+        f_lr: float,
+        epochs: int,
+        burn_in: int,
+    ) -> Tuple[float, Optional[dict], int, list, list, nn.Module, nn.Module]:
+        """
+        Train fresh h and f for `epochs` epochs with given LRs.
+
+        Returns:
+            best_dev_loss, best_h_state, best_epoch,
+            loss_history, dev_moment_history,
+            h_model, f_model
+        """
+        device = x_train.device
+        h, f = self._make_models(device)
         objective = OptimalMomentObjective()
+        h_opt = OptimizerFactory(OAdam, lr=h_lr, betas=(0.5, 0.9))(h)
+        f_opt = OptimizerFactory(OAdam, lr=f_lr, betas=(0.5, 0.9))(f)
 
-        self.h = h; self.f = f
         n = x_train.shape[0]
+        best_dev_loss = float("inf")
+        best_h_state: Optional[dict] = None
+        best_epoch = -1
+        loss_history: list = []
+        dev_moment_history: list = []
 
-        for epoch in range(self.max_num_epochs):
+        for epoch in range(epochs):
             h.train(); f.train()
-            perm = torch.randperm(n, device=x_train.device)
+            perm = torch.randperm(n, device=device)
             num_batches = int(np.ceil(n / self.batch_size))
             epoch_h = 0.0; epoch_f = 0.0
 
@@ -173,22 +182,84 @@ class OriginalDeepGMMBaseline:
                 epoch_h += float(h_obj.detach().cpu())
                 epoch_f += float(f_obj.detach().cpu())
 
-            self.loss_history.append((epoch_h / num_batches, epoch_f / num_batches))
+            loss_history.append((epoch_h / num_batches, epoch_f / num_batches))
 
-            # ── model selection + Polyak snapshot ───────────────────────────
-            if epoch >= self.burn_in and epoch % self.eval_freq == 0:
-                self._snapshot(x_train)
-                if x_dev_t is not None:
-                    dev_loss = self._dev_moment(x_dev_t, z_dev_t, y_dev_t)
-                    self.dev_moment_history.append((epoch, dev_loss))
-                    if dev_loss < self._best_dev_loss:
-                        self._best_dev_loss = dev_loss
-                        self._best_h_state = copy.deepcopy(h.state_dict())
-                        self.best_checkpoint_epoch = epoch
+            if epoch >= burn_in and epoch % self.eval_freq == 0 and x_dev is not None:
+                dev_loss = self._dev_mse(h, x_dev, y_dev)
+                dev_moment_history.append((epoch, dev_loss))
+                if dev_loss < best_dev_loss:
+                    best_dev_loss = dev_loss
+                    best_h_state = copy.deepcopy(h.state_dict())
+                    best_epoch = epoch
 
-            if verbose and epoch % 50 == 0:
-                h_l, f_l = self.loss_history[-1]
-                print(f"  epoch={epoch:04d}  h_loss={h_l:.5f}  f_loss={f_l:.5f}")
+        return best_dev_loss, best_h_state, best_epoch, loss_history, dev_moment_history, h, f
+
+    # ── main fit ─────────────────────────────────────────────────────────────
+
+    def fit(
+        self,
+        train_data: PVTrainDataSetMARTorch,
+        dev_data: Optional[PVTrainDataSetMARTorch] = None,
+        verbose: bool = False,
+    ) -> None:
+        train_data = self._filter_data(train_data)
+        x_train, z_train = self._to_xz(train_data)
+        y_train = train_data.outcome
+
+        x_dev_t = y_dev_t = None
+        if dev_data is not None:
+            dev_filtered = self._filter_data(dev_data)
+            x_dev_t, _ = self._to_xz(dev_filtered)
+            y_dev_t = dev_filtered.outcome
+
+        self._train_w = train_data.outcome_proxy.detach().cpu()
+
+        if self.enable_cuda and torch.cuda.is_available():
+            x_train = x_train.cuda(); z_train = z_train.cuda(); y_train = y_train.cuda()
+            if x_dev_t is not None:
+                x_dev_t = x_dev_t.cuda(); y_dev_t = y_dev_t.cuda()
+
+        # ── LR selection phase ───────────────────────────────────────────────
+        grid = self.lr_grid if self.lr_grid and len(self.lr_grid) > 1 else None
+        if grid is not None:
+            best_sel_loss = float("inf")
+            best_h_lr = grid[0]
+            if verbose:
+                print(f"  [LR selection] trying {len(grid)} configs for {self.selection_epochs} epochs each")
+            for h_lr_cand in grid:
+                f_lr_cand = 5.0 * h_lr_cand
+                sel_loss, _, sel_epoch, _, _, _, _ = self._train_one_config(
+                    x_train, z_train, y_train, x_dev_t, y_dev_t,
+                    h_lr_cand, f_lr_cand,
+                    self.selection_epochs, burn_in=200,
+                )
+                if verbose:
+                    print(f"    h_lr={h_lr_cand:.1e}  f_lr={f_lr_cand:.1e}  "
+                          f"best_dev_mse={sel_loss:.5f}  (epoch {sel_epoch})")
+                if sel_loss < best_sel_loss:
+                    best_sel_loss = sel_loss
+                    best_h_lr = h_lr_cand
+            winning_h_lr = best_h_lr
+            winning_f_lr = 5.0 * best_h_lr
+            if verbose:
+                print(f"  [LR selection] winner: h_lr={winning_h_lr:.1e}  f_lr={winning_f_lr:.1e}")
+        else:
+            # Single config — use constructor h_lr / f_lr (or the only grid entry)
+            winning_h_lr = self.lr_grid[0] if self.lr_grid else self.h_lr
+            winning_f_lr = 5.0 * winning_h_lr if self.lr_grid else self.f_lr
+
+        # ── Full training run with winning LR ────────────────────────────────
+        if verbose:
+            print(f"  [Full training] h_lr={winning_h_lr:.1e}  f_lr={winning_f_lr:.1e}  "
+                  f"epochs={self.max_num_epochs}  burn_in={self.burn_in}")
+
+        (self._best_dev_loss, self._best_h_state, self.best_checkpoint_epoch,
+         self.loss_history, self.dev_moment_history,
+         self.h, self.f) = self._train_one_config(
+            x_train, z_train, y_train, x_dev_t, y_dev_t,
+            winning_h_lr, winning_f_lr,
+            self.max_num_epochs, self.burn_in,
+        )
 
         if self._best_h_state is not None:
             self.h.load_state_dict(self._best_h_state)

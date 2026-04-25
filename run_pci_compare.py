@@ -46,6 +46,9 @@ def _one_rep(
     batch_size: int,
     n_folds: int,
     use_cuda: bool,
+    burn_in: int = 1000,
+    lr_grid: Optional[List[float]] = None,
+    selection_epochs: int = 2000,
 ) -> Dict[str, List]:
     results = []
     diagnostics = []  # per-epoch rows
@@ -75,6 +78,9 @@ def _one_rep(
                 mode=method_mode,
                 max_num_epochs=max_num_epochs,
                 batch_size=batch_size,
+                burn_in=burn_in,
+                lr_grid=lr_grid,
+                selection_epochs=selection_epochs,
                 enable_cuda=use_cuda,
             )
             method.fit(train_data, dev_data, verbose=False)
@@ -161,16 +167,20 @@ def main() -> None:
     )
 
     # ── runtime args (all default None so CLI can override config) ────────────
-    parser.add_argument("--n-rep",        type=int,   default=None)
-    parser.add_argument("--missing-rate", type=float, default=None)
-    parser.add_argument("--n-train",      type=int,   default=None)
-    parser.add_argument("--n-dev",        type=int,   default=None)
-    parser.add_argument("--n-folds",      type=int,   default=None)
-    parser.add_argument("--max-epochs",   type=int,   default=None)
-    parser.add_argument("--batch-size",   type=int,   default=None)
-    parser.add_argument("--dump-root",    type=str,   default=None)
-    parser.add_argument("--num-cpus",     type=int,   default=None)
-    parser.add_argument("--no-cuda",      action="store_true")
+    parser.add_argument("--n-rep",             type=int,   default=None)
+    parser.add_argument("--missing-rate",      type=float, default=None)
+    parser.add_argument("--n-train",           type=int,   default=None)
+    parser.add_argument("--n-dev",             type=int,   default=None)
+    parser.add_argument("--n-folds",           type=int,   default=None)
+    parser.add_argument("--max-epochs",        type=int,   default=None)
+    parser.add_argument("--batch-size",        type=int,   default=None)
+    parser.add_argument("--burn-in",           type=int,   default=None)
+    parser.add_argument("--selection-epochs",  type=int,   default=None)
+    parser.add_argument("--no-lr-grid",        action="store_true",
+                        help="Disable LR grid search for oracle/naive (use single fixed LR).")
+    parser.add_argument("--dump-root",         type=str,   default=None)
+    parser.add_argument("--num-cpus",          type=int,   default=None)
+    parser.add_argument("--no-cuda",           action="store_true")
 
     args = parser.parse_args()
 
@@ -181,22 +191,28 @@ def main() -> None:
         print(f"Loaded config set '{args.config}'"
               + (f" from {args.config_file}" if args.config_file else ""))
 
-    n_rep         = _resolve(args.n_rep,        config, "n_rep",          50)
-    missing_rate  = _resolve(args.missing_rate, config, "missing_rate",   0.3)
-    n_train       = _resolve(args.n_train,      config, "n_train",        2000)
-    n_dev         = _resolve(args.n_dev,        config, "n_dev",          800)
-    n_folds       = _resolve(args.n_folds,      config, "n_folds",        5)
-    max_num_epochs= _resolve(args.max_epochs,   config, "max_num_epochs", 500)
-    batch_size    = _resolve(args.batch_size,   config, "batch_size",     256)
-    dump_root     = _resolve(args.dump_root,    config, "dump_root",      "dumps")
-    num_cpus      = _resolve(args.num_cpus,     config, "num_cpus",       1)
-    use_cuda      = not args.no_cuda
+    n_rep            = _resolve(args.n_rep,           config, "n_rep",            50)
+    missing_rate     = _resolve(args.missing_rate,    config, "missing_rate",     0.3)
+    n_train          = _resolve(args.n_train,         config, "n_train",          2000)
+    n_dev            = _resolve(args.n_dev,           config, "n_dev",            800)
+    n_folds          = _resolve(args.n_folds,         config, "n_folds",          5)
+    max_num_epochs   = _resolve(args.max_epochs,      config, "max_num_epochs",   30000)
+    batch_size       = _resolve(args.batch_size,      config, "batch_size",       1024)
+    burn_in          = _resolve(args.burn_in,         config, "burn_in",          1000)
+    selection_epochs = _resolve(args.selection_epochs,config, "selection_epochs", 2000)
+    dump_root        = _resolve(args.dump_root,       config, "dump_root",        "dumps")
+    num_cpus         = _resolve(args.num_cpus,        config, "num_cpus",         10)
+    use_cuda         = not args.no_cuda
+    lr_grid: Optional[List[float]] = (
+        None if args.no_lr_grid else config.get("lr_grid", [5e-4, 2e-4, 1e-4])
+    )
 
     # ── print resolved parameters ─────────────────────────────────────────────
     print(
         f"n_rep={n_rep}  n_train={n_train}  n_dev={n_dev}  "
         f"missing_rate={missing_rate}  max_epochs={max_num_epochs}  "
-        f"batch={batch_size}  folds={n_folds}  cpus={num_cpus}"
+        f"batch={batch_size}  burn_in={burn_in}  folds={n_folds}  "
+        f"selection_epochs={selection_epochs}  lr_grid={lr_grid}  cpus={num_cpus}"
     )
 
     # ── run ───────────────────────────────────────────────────────────────────
@@ -209,6 +225,9 @@ def main() -> None:
         delayed(_one_rep)(
             seed, n_train, n_dev, missing_rate,
             max_num_epochs, batch_size, n_folds, use_cuda,
+            burn_in=burn_in,
+            lr_grid=lr_grid,
+            selection_epochs=selection_epochs,
         )
         for seed in range(n_rep)
     )

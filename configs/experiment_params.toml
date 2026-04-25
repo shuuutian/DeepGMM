@@ -18,74 +18,85 @@ seed         = 42
 h_layers = [64, 64]
 f_layers = [64, 64]
 
-# optimizer (OAdam)
-h_lr    = 2.0e-4
-f_lr    = 8.0e-4
+# optimizer (OAdam) — h_lr / f_lr used only if lr_grid is absent
+h_lr    = 5.0e-4
+f_lr    = 2.5e-3
 h_betas = [0.5, 0.9]
 f_betas = [0.5, 0.9]
 
+# LR grid search for oracle/naive (h_lr values; f_lr = 5 * h_lr each)
+# Set to single-element list or omit to disable grid search.
+lr_grid = [5.0e-4, 2.0e-4, 1.0e-4]
+
 # learning loop
-n_folds        = 5
-max_num_epochs = 500
-batch_size     = 256
-ema_alpha      = 0.05
-ridge          = 1.0e-3
-lambda_1       = 0.25    # f_reg weight in PCIOptimalMomentObjective
-enable_cuda    = false
+n_folds          = 5
+max_num_epochs   = 6000
+batch_size       = 1024
+burn_in          = 1000
+selection_epochs = 2000    # epochs per LR candidate in grid search
+ema_alpha        = 0.05
+ridge            = 1.0e-3
+lambda_1         = 0.25    # f_reg weight in PCIOptimalMomentObjective
+enable_cuda      = false
 
 # ── Set A: smoke test ─────────────────────────────────────────────────────────
 # Purpose : quick sanity check — pipeline runs, loss is finite, no NaN
-# Runtime : < 2 min on CPU
+# Runtime : < 5 min on CPU
 [sets.smoke]
-n_train        = 1000
-n_dev          = 300
-missing_rate   = 0.3
-h_layers       = [64, 64]
-f_layers       = [64, 64]
-max_num_epochs = 450     # enough for burn_in=200 + model selection to kick in
-batch_size     = 256
-n_folds        = 5
-ema_alpha      = 0.05
-ridge          = 1.0e-3
+n_train          = 1000
+n_dev            = 300
+missing_rate     = 0.3
+h_layers         = [64, 64]
+f_layers         = [64, 64]
+max_num_epochs   = 600      # enough for burn_in=400 to kick in
+batch_size       = 256
+burn_in          = 400
+selection_epochs = 300      # short selection phase for smoke test
+lr_grid          = [5.0e-4] # single LR — no grid search in smoke test
+n_folds          = 5
+ema_alpha        = 0.05
+ridge            = 1.0e-3
 
 # ── Set B: standard experiment ────────────────────────────────────────────────
 # Purpose : single-run production quality; use for initial ATE bias check
-# Runtime : ~10 min on CPU
+# Runtime : ~1-2 hr on CPU (LR grid search + 6000 epochs)
 [sets.standard]
-n_train        = 2000
-n_dev          = 500
-missing_rate   = 0.3
-h_layers       = [64, 64]
-f_layers       = [64, 64]
-h_lr           = 2.0e-4
-f_lr           = 8.0e-4
-max_num_epochs = 500
-batch_size     = 256
-n_folds        = 5
-ema_alpha      = 0.05
-ridge          = 1.0e-3
+n_train          = 2000
+n_dev            = 500
+missing_rate     = 0.3
+h_layers         = [64, 64]
+f_layers         = [64, 64]
+lr_grid          = [5.0e-4, 2.0e-4, 1.0e-4]
+max_num_epochs   = 6000
+batch_size       = 1024
+burn_in          = 1000
+selection_epochs = 2000
+n_folds          = 5
+ema_alpha        = 0.05
+ridge            = 1.0e-3
 
 # ── Set C: Monte Carlo comparison ─────────────────────────────────────────────
 # Purpose : oracle / modified / naive comparison across 50 seeds
 #           feeds directly into run_pci_compare.py
 # Runtime : ~hours; use slurm_job.sh for Spartan
 [sets.compare]
-n_train        = 2000
-n_dev          = 500
-missing_rate   = 0.3
-h_layers       = [64, 64]
-f_layers       = [64, 64]
-h_lr           = 2.0e-4
-f_lr           = 8.0e-4
-max_num_epochs = 500
-batch_size     = 256
-n_folds        = 5
-ema_alpha      = 0.05
-ridge          = 1.0e-3
+n_train          = 2000
+n_dev            = 500
+missing_rate     = 0.3
+h_layers         = [64, 64]
+f_layers         = [64, 64]
+lr_grid          = [5.0e-4, 2.0e-4, 1.0e-4]
+max_num_epochs   = 6000
+batch_size       = 1024
+burn_in          = 1000
+selection_epochs = 2000
+n_folds          = 5
+ema_alpha        = 0.05
+ridge            = 1.0e-3
 # comparison-script-specific
-n_rep          = 300
-num_cpus       = 10
-dump_root      = "dumps"
+n_rep            = 300
+num_cpus         = 10
+dump_root        = "dumps"
 
 # ── Set D: missing-rate ablation ──────────────────────────────────────────────
 # Purpose : sweep missing_rate to show modified vs naive gap widens

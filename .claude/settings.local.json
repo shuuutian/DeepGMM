@@ -5,7 +5,8 @@
       "Bash(.venv/bin/python run_pci_compare.py --help)",
       "Bash(python:*)",
       "Bash(python3:*)",
-      "Bash(source:*)"
+      "Bash(source:*)",
+      "Bash(uv run:*)"
     ]
   }
 }
