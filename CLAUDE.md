@@ -81,7 +81,7 @@ EMA update (correct direction): `theta_bar ← (1 - ema_alpha) * theta_bar + ema
 | MAR data class reference | `/Users/apple/DeepFeatureProxyVariable/src/data/ate/data_class_mar.py` |
 | Comparison script reference | `/Users/apple/DeepFeatureProxyVariable/scripts/compare_dfpv_variants.py` |
 | Working paper (LaTeX) | `/Users/apple/2602_WenPaper/PCI_paper_draft_overleaf/main.tex` |
-| Spartan remote root | `/home/wzzho2/DeepGMM` |
+| Spartan remote root | `/home/wzzho2/DeepGMM-shutian` (active; `/home/wzzho2/DeepGMM` is the stale Oct-2025 clone) |
 
 ## Validation-protocol artefacts
 
@@ -99,3 +99,79 @@ Conventions defined there and used throughout the repo:
 - **Research diary.** `RESEARCH_DIARY.md` at repo root is the chronological per-run record. Consulted before designing any new sub-experiment to avoid re-running prior trials. (File created on the first run of Phase 1, not yet present.)
 
 Walk-throughs and the §4.2 theory-anchoring map live as separate pages in the same Notion Research database.
+
+## Spartan environment
+
+Reference card for running this repo on the University of Melbourne Spartan HPC. Verified 2026-04-26.
+
+**Identity / auth.**
+- User: `wzzho2`. SSH alias: `spartan.hpc.unimelb.edu.au` (declared in `~/.ssh/config` with `User wzzho2` and `ForwardAgent yes`).
+- Passwordless auth via `~/.ssh/id_ed25519_spartan` (no passphrase). Public key already in `~wzzho2/.ssh/authorized_keys` on Spartan.
+- Project allocation: `punim2738`. Available QoS: `fos`, `normal`, `publiccp+`.
+
+**Repo path.** `/home/wzzho2/DeepGMM-shutian` is the active clone of `github.com/shuuutian/DeepGMM`. The older `/home/wzzho2/DeepGMM/` is from Oct 2025 and pre-dates the PCI/MAR fork — do not write there.
+
+**Tooling on Spartan.**
+- `uv` at `~/.local/bin/uv` — not on the default `PATH`. Slurm scripts must `export PATH="$HOME/.local/bin:$PATH"`.
+- `git 2.47.3` at `/usr/bin/git`.
+- No system `python` module-load is required when `uv` is used; `uv sync` provisions its own interpreter and the venv lives in `.venv/`.
+- Run `uv sync` once on the **login node** (not inside the slurm script) so `pypi` reach + first-time download isn't on the experiment's wall-clock budget.
+
+**Partition reference (CPU).**
+
+| Partition | Wall-time | CPUs/node | Memory/node | Use |
+|---|---|---|---|---|
+| `sapphire` (default `*`) | 30 days | 128 | ~1 TB | **Default for this repo's CPU runs** |
+| `cascade` | 30 days | 72 | ~772 GB | Alternative; smaller nodes |
+| `bigmem` | 21 days | 72-128 | 3-4 TB | Only for > 1 TB working sets |
+| `long` | 90 days | 72 | ~772 GB | Only if wall-time > 30 days |
+| `interactive` | 2 days | 128 | ~1 TB | One running job/user; for debugging |
+
+Per-user CPU cap on `cascade`/`sapphire` is 1400. GPU runs use `-p fos-gpu-l40s --qos=fos --gres=gpu:1` (legacy from the GPU experiments under `/home/wzzho2/DeepGMM/1try/`).
+
+**Canonical SBATCH header for this repo's CPU runs:**
+```bash
+#!/bin/bash -l
+#SBATCH -J pci_compare
+#SBATCH -A punim2738
+#SBATCH -p sapphire
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=32G
+#SBATCH --time=24:00:00
+#SBATCH -o logs/%x-%j.out
+#SBATCH -e logs/%x-%j.err
+set -euo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+cd "$SLURM_SUBMIT_DIR"
+mkdir -p logs
+uv run python run_pci_compare.py --config compare --num-cpus 16 --no-cuda
+```
+
+**End-to-end run workflow (local → Spartan → back):**
+1. **Local:** edit / commit / `git tag run/<role>/<YYYYMMDD-NN>` / `git push origin master --follow-tags`.
+2. **Spartan, first time only:**
+   ```bash
+   ssh wzzho2@spartan.hpc.unimelb.edu.au
+   cd /home/wzzho2/DeepGMM-shutian
+   git clone https://github.com/shuuutian/DeepGMM.git .   # only if empty
+   ~/.local/bin/uv sync                                    # one-time deps
+   ```
+3. **Spartan, every run:**
+   ```bash
+   cd /home/wzzho2/DeepGMM-shutian
+   git fetch && git checkout run/<role>/<YYYYMMDD-NN>
+   mkdir -p logs
+   sbatch slurm_job.sh
+   squeue -u wzzho2          # status
+   ```
+4. **When the job finishes,** rsync the dump back to the local repo:
+   ```bash
+   rsync -avz wzzho2@spartan.hpc.unimelb.edu.au:DeepGMM-shutian/dumps/<dump-folder>/ ./dumps/<dump-folder>/
+   ```
+
+**Diagnostics:**
+- Queue state: `squeue -u wzzho2`
+- Job priority breakdown: `sprio -j <jobid>`
+- Partition load: `sinfo -s -p sapphire`
+- Account / QoS / wall-time limits: `sacctmgr show assoc user=wzzho2 format=Account,Partition,QOS,DefaultQOS,MaxJobs,MaxSubmit,MaxWall%20`
+- Cancel: `scancel <jobid>`
