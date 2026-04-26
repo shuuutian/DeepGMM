@@ -12,4 +12,6 @@ dependencies = [
     "tensorflow>=2.20.0",
     "scikit-learn>=1.6.1",
     "torch>=2.1.0",
+    "pandas>=2.2.0",   # learning/learning_dev_f.py (DataFrame for grad-history logging)
+    "joblib>=1.3.0",   # run_pci_compare.py Parallel/delayed
 ]
