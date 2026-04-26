@@ -139,7 +139,7 @@ class DemandScenario(AbstractScenario):
                 num_data=num_dev, missing_rate=missing_rate, seed=seed + 1
             )
 
-        treatment_grid = np.linspace(20.0, 60.0, num=max(num_test, 2)).reshape(-1, 1)
+        treatment_grid = np.linspace(10.0, 30.0, num=max(num_test, 2)).reshape(-1, 1)
         structural_outcome = self._estimate_structural_curve(treatment_grid=treatment_grid, seed=seed + 2)
         self._test_data = DemandTestData(
             treatment_grid=treatment_grid.astype(np.float64),
