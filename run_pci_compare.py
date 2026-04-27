@@ -97,14 +97,14 @@ def _one_rep(
     #   O_mar / M          → PCIDeepGMMMethod (oracle / modified) with W = x
     # Dispatched through ToyModelModifiedDeepGMMMethod.
     MODES = [
-        ("B",      "demand",  "mar_naive",    "original", "naive"),
-        ("O_orig", "demand",  "oracle",       "original", "oracle"),
-        ("O_mar",  "demand",  "oracle",       "pci",      "oracle"),
-        ("M",      "demand",  "mar_modified", "pci",      "modified"),
-        ("B",      "toy_sin", "sin",          "toy",      "naive"),
-        ("O_orig", "toy_sin", "sin",          "toy",      "oracle"),
-        ("O_mar",  "toy_sin", "sin",          "toy",      "oracle_mar"),
-        ("M",      "toy_sin", "sin",          "toy",      "modified"),
+        ("baseline",         "demand",  "mar_naive",    "original", "naive"),
+        ("oracle_baseline",  "demand",  "oracle",       "original", "oracle"),
+        ("oracle_modified",  "demand",  "oracle",       "pci",      "oracle"),
+        ("modified",         "demand",  "mar_modified", "pci",      "modified"),
+        ("baseline",         "toy_sin", "sin",          "toy",      "naive"),
+        ("oracle_baseline",  "toy_sin", "sin",          "toy",      "oracle"),
+        ("oracle_modified",  "toy_sin", "sin",          "toy",      "oracle_mar"),
+        ("modified",         "toy_sin", "sin",          "toy",      "modified"),
     ]
 
     # ── pre-generate toy DGP data once per rep (shared across 4 toy modes) ───
@@ -364,10 +364,10 @@ def main() -> None:
     )
 
     _color_map = {
-        "B":      "#DD8452",
-        "O_orig": "#55A868",
-        "O_mar":  "#4C72B0",
-        "M":      "#B221E2",
+        "baseline":        "#DD8452",
+        "oracle_baseline": "#55A868",
+        "oracle_modified": "#4C72B0",
+        "modified":        "#B221E2",
     }
     # Bias distribution: one panel per DGP (scales differ markedly between
     # demand and toy_sin so a single overlay would compress the toy panel).
