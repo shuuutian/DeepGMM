@@ -315,9 +315,19 @@ def main() -> None:
     )
 
     # ── run ───────────────────────────────────────────────────────────────────
-    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Timestamp includes microseconds so concurrent jobs (e.g. SLURM array
+    # tasks that all fire `dt.datetime.now()` within the same second) get
+    # distinct dump folders. The previous %Y%m%d_%H%M%S format collided in
+    # job 24389396_[1-4] (2026-04-28) and three task outputs were
+    # overwritten by "last writer wins". Microsecond resolution makes
+    # collisions effectively impossible across array tasks on different
+    # nodes; for extra safety on the same node we also append the SLURM
+    # array task ID when present.
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    array_id = os.environ.get("SLURM_ARRAY_TASK_ID")
+    suffix = f"_a{array_id}" if array_id is not None else ""
     label = args.config if args.config else "custom"
-    out_dir = os.path.join(dump_root, f"compare_{label}_{timestamp}")
+    out_dir = os.path.join(dump_root, f"compare_{label}_{timestamp}{suffix}")
     os.makedirs(out_dir, exist_ok=True)
 
     rep_outputs = Parallel(n_jobs=num_cpus)(
