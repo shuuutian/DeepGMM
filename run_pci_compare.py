@@ -78,6 +78,7 @@ def _one_rep(
 ) -> Dict[str, List]:
     results = []
     diagnostics = []  # per-epoch rows
+    predictions = []  # per-grid-point β̂(a) rows (for per-a box-plot)
 
     # Eight canonical runs per rep — same four roles on each of two DGPs.
     # Tuple shape: (label, dgp, scenario_arg, impl, internal_mode)
@@ -120,6 +121,13 @@ def _one_rep(
         toy_scenario._true_g_function_np(np.array([[toy_a1]])).flat[0]
         - toy_scenario._true_g_function_np(np.array([[toy_a0]])).flat[0]
     )
+    # 10-point eval grid for toy_sin (matches the demand grid size for parity
+    # in the per-a box-plot). a1=1, a0=-1 are the first/last entries so the
+    # ATE definition β(a1) − β(a0) is unchanged.
+    toy_treatment_grid = np.linspace(toy_a1, toy_a0, num=10)
+    toy_structural_outcome = toy_scenario._true_g_function_np(
+        toy_treatment_grid.reshape(-1, 1)
+    ).flatten()
 
     def _t(a: np.ndarray) -> torch.Tensor:
         return torch.as_tensor(a, dtype=torch.float64)
@@ -138,9 +146,13 @@ def _one_rep(
             ate_true   = float(test.structural_outcome[0, 0] - test.structural_outcome[-1, 0])
             a1 = float(test.treatment_grid[0, 0])
             a0 = float(test.treatment_grid[-1, 0])
+            grid_a    = test.treatment_grid.flatten().astype(np.float64)
+            grid_beta = test.structural_outcome.flatten().astype(np.float64)
         elif dgp == "toy_sin":
             ate_true = toy_ate_true
             a1, a0 = toy_a1, toy_a0
+            grid_a    = toy_treatment_grid.astype(np.float64)
+            grid_beta = toy_structural_outcome.astype(np.float64)
         else:
             raise ValueError(f"Unknown dgp: {dgp}")
 
@@ -214,6 +226,23 @@ def _one_rep(
             "best_checkpoint_epoch": best_ckpt_epoch,
         })
 
+        # Per-grid-point β̂(a) for the per-a box-plot. One row per grid value.
+        # bias_at_a = β̂(a) − β(a); the structural curve β(a) is computed on
+        # the scenario side (demand: MC over W; toy_sin: closed-form).
+        for ai, a_val in enumerate(grid_a):
+            beta_hat_a = float(method.beta_hat(float(a_val)))
+            beta_true_a = float(grid_beta[ai])
+            predictions.append({
+                "rep":         seed,
+                "method":      label,
+                "dgp":         dgp,
+                "a_idx":       ai,
+                "a":           float(a_val),
+                "beta_hat":    beta_hat_a,
+                "beta_true":   beta_true_a,
+                "bias_at_a":   beta_hat_a - beta_true_a,
+            })
+
         # per-epoch loss curve (loss_history is empty for toy oracle/naive,
         # populated for everything else — including toy oracle_mar / modified
         # via the underlying PCIDeepGMMMethod)
@@ -231,7 +260,7 @@ def _one_rep(
                     "dev_moment": dev_moment,
                 })
 
-    return {"results": results, "diagnostics": diagnostics}
+    return {"results": results, "diagnostics": diagnostics, "predictions": predictions}
 
 
 def _write_csv(path: str, rows: List[Dict], header: List[str]) -> None:
@@ -246,6 +275,103 @@ def _resolve(cli_val, config: Dict[str, Any], key: str, fallback):
     if cli_val is not None:
         return cli_val
     return config.get(key, fallback)
+
+
+# Canonical method order and colors. Used by every plot in this file and by
+# the standalone replot script (plot_per_a_boxplots.py imports them).
+METHOD_ORDER = ["baseline", "oracle_baseline", "oracle_modified", "modified"]
+METHOD_COLORS = {
+    "baseline":        "#DD8452",
+    "oracle_baseline": "#55A868",
+    "oracle_modified": "#4C72B0",
+    "modified":        "#B221E2",
+}
+
+
+def _plot_per_a_boxplots(
+    predictions: List[Dict[str, Any]],
+    out_path: str,
+    missing_rate: Optional[float] = None,
+    title_suffix: str = "",
+) -> None:
+    """Box-plot of β̂(a) − β(a) per treatment value, 4 methods side-by-side.
+
+    `predictions` is a list of dicts with keys
+    (rep, method, dgp, a_idx, a, beta_hat, beta_true, bias_at_a) — i.e. the
+    rows of `predictions.csv`. One panel per DGP; within each panel the
+    x-axis ticks are the unique a-values (sorted ascending) and at each tick
+    we draw four box-plots (one per method) at small horizontal offsets so
+    they sit side-by-side.
+    """
+    if not predictions:
+        return
+    dgps_seen = sorted({r["dgp"] for r in predictions})
+    fig, axes = plt.subplots(
+        len(dgps_seen), 1,
+        figsize=(13, 4.8 * len(dgps_seen)),
+        squeeze=False,
+    )
+    for di, dgp in enumerate(dgps_seen):
+        ax = axes[di][0]
+        dgp_rows = [r for r in predictions if r["dgp"] == dgp]
+        a_values = sorted({float(r["a"]) for r in dgp_rows})
+        methods_present = [m for m in METHOD_ORDER
+                           if m in {r["method"] for r in dgp_rows}]
+        n_methods = max(len(methods_present), 1)
+        group_w = 0.82
+        box_w = group_w / n_methods
+        offsets = np.linspace(
+            -group_w / 2 + box_w / 2,
+            +group_w / 2 - box_w / 2,
+            n_methods,
+        )
+
+        legend_handles = []
+        for mi, method in enumerate(methods_present):
+            data_per_a = []
+            for a in a_values:
+                vals = [float(r["bias_at_a"]) for r in dgp_rows
+                        if r["method"] == method
+                        and float(r["a"]) == a]
+                data_per_a.append(np.asarray(vals, dtype=np.float64))
+            positions = np.arange(len(a_values)) + offsets[mi]
+            color = METHOD_COLORS.get(method, f"C{mi}")
+            ax.boxplot(
+                data_per_a,
+                positions=positions,
+                widths=box_w * 0.9,
+                patch_artist=True,
+                boxprops=dict(facecolor=color, alpha=0.55, edgecolor=color),
+                medianprops=dict(color="black", linewidth=1.4),
+                whiskerprops=dict(color=color),
+                capprops=dict(color=color),
+                flierprops=dict(marker="o", markersize=2.5,
+                                markerfacecolor=color,
+                                markeredgecolor=color, alpha=0.45),
+                showfliers=True,
+                manage_ticks=False,
+            )
+            legend_handles.append(
+                plt.Rectangle((0, 0), 1, 1, facecolor=color, alpha=0.55,
+                              edgecolor=color, label=method)
+            )
+
+        ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
+        ax.set_xticks(np.arange(len(a_values)))
+        ax.set_xticklabels([f"{a:.2f}" for a in a_values])
+        ax.set_xlim(-0.5, len(a_values) - 0.5)
+        title = f"{dgp} — per-a bias  β̂(a) − β(a)"
+        if missing_rate is not None:
+            title += f"   (missing_rate={missing_rate})"
+        if title_suffix:
+            title += f"   {title_suffix}"
+        ax.set_title(title)
+        ax.set_xlabel("treatment a")
+        ax.set_ylabel("β̂(a) − β(a)")
+        ax.legend(handles=legend_handles, title="Method", loc="best")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=160)
+    plt.close(fig)
 
 
 def main() -> None:
@@ -342,6 +468,7 @@ def main() -> None:
     )
     results = [row for rep in rep_outputs for row in rep["results"]]
     diagnostics = [row for rep in rep_outputs for row in rep["diagnostics"]]
+    predictions = [row for rep in rep_outputs for row in rep["predictions"]]
 
     _write_csv(
         os.path.join(out_dir, "results.csv"),
@@ -353,6 +480,12 @@ def main() -> None:
         os.path.join(out_dir, "diagnostics.csv"),
         diagnostics,
         header=["rep", "method", "dgp", "epoch", "h_loss", "f_loss", "dev_moment"],
+    )
+    _write_csv(
+        os.path.join(out_dir, "predictions.csv"),
+        predictions,
+        header=["rep", "method", "dgp", "a_idx", "a",
+                "beta_hat", "beta_true", "bias_at_a"],
     )
 
     summary = []
@@ -373,12 +506,7 @@ def main() -> None:
         header=["method", "dgp", "mean_bias", "std_bias", "rmse"],
     )
 
-    _color_map = {
-        "baseline":        "#DD8452",
-        "oracle_baseline": "#55A868",
-        "oracle_modified": "#4C72B0",
-        "modified":        "#B221E2",
-    }
+    _color_map = METHOD_COLORS  # canonical, defined at module level
     # Bias distribution: one panel per DGP (scales differ markedly between
     # demand and toy_sin so a single overlay would compress the toy panel).
     dgps_seen = sorted({row["dgp"] for row in results})
@@ -416,6 +544,14 @@ def main() -> None:
         fig.savefig(os.path.join(out_dir, "bias_distribution.png"), dpi=160)
         plt.close(fig)
         plt.style.use("default")
+
+    # ── per-a box-plot: 4 methods × 10 grid points (one panel per DGP) ───────
+    if predictions:
+        _plot_per_a_boxplots(
+            predictions,
+            out_path=os.path.join(out_dir, "per_a_boxplots.png"),
+            missing_rate=missing_rate,
+        )
 
     # ── loss-curve and dev-moment plots (median ± IQR across reps) ───────────
     method_dgp_pairs_seen = sorted({(r["method"], r["dgp"]) for r in diagnostics})

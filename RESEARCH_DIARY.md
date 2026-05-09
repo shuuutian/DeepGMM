@@ -177,3 +177,86 @@ Two sites changed: the `MODES` list and the `_color_map` for the bias-distributi
   3. Toy_sin RMSE for all methods stays within ~0.1 of Run 3 across the sweep.
   4. Diminishing returns kick in: marginal RMSE drop per 4000 added epochs decreases; the curve plateaus by 22000 or 26000.
 - **Verification when sweep lands:** rsync each summary.csv + bias_distribution.png back to local; build a single overlay plot of RMSE-vs-max_epochs per (method, dgp); append a results-table entry to this diary; if the plateau is reached, declare the §4.3-tightened result and close the iteration.
+
+---
+
+## 2026-04-28 — Phase 5 epoch sweep, partial (tasks 0 and 4 only)
+
+- **Folders:**
+  - `dumps/compare_compare_20260428_012952__task0_10000ep/` — task 0, max_epochs=10000
+  - `dumps/compare_compare_20260428_013026__task4_26000ep/` — task 4, max_epochs=26000
+- **Submission / git tag / commit:** SLURM array `24389396_[0-4]` · `run/M/20260428-01` · `560dc6a` · `master`
+- **Wall time:** task 0 = 06:52:36, task 4 = 21:07:09 (16 CPUs sapphire each). Note: ~10 of task 4's 21h was the post-training `training_curves.png` plot; the in-script implementation is O(reps × epochs²) Python list iteration which becomes the long pole at high epoch counts.
+- **Status of the other three tasks:** **LOST.** Tasks 1 (14k), 2 (18k), 3 (22k) all started within the same wall-clock second, so all four called `dt.datetime.now().strftime("%Y%m%d_%H%M%S")` and produced the *same* dump folder name `compare_compare_20260428_013026`. Each task wrote to that path independently and "last writer wins" → only task 4 (the longest) survived. Tasks 1-3 must be re-run; fix committed at `567999d` / `run/M/20260429-01` (microsecond timestamp + `_a<SLURM_ARRAY_TASK_ID>` suffix).
+
+- **Observed at the two recoverable points** (n_rep=300, in-support grid `[22, 36]`, all other params = `[sets.compare]` defaults):
+
+    | (method, dgp) | 6k (Run 3) | 10k (task 0) | 26k (task 4) |
+    | --- | ---: | ---: | ---: |
+    | baseline / demand — mean_bias | −1.44 | **−0.61** | **+2.37** |
+    | baseline / demand — RMSE | 1.67 | **1.06** | **2.68** |
+    | modified / demand — mean_bias | −0.64 | **−0.65** | **+0.50** |
+    | modified / demand — RMSE | 1.26 | **1.03** | **0.90** |
+    | oracle_baseline / demand — mean_bias | −2.62 | −1.89 | −0.03 |
+    | oracle_baseline / demand — RMSE | 2.80 | 2.05 | 0.95 |
+    | oracle_modified / demand — mean_bias | −1.24 | −1.14 | +0.11 |
+    | oracle_modified / demand — RMSE | 1.60 | 1.38 | 0.81 |
+    | baseline / toy_sin — RMSE | 2.34 | 2.32 | 2.29 |
+    | modified / toy_sin — RMSE | 0.43 | 0.44 | 0.42 |
+    | oracle_baseline / toy_sin — RMSE | 1.00 | 0.95 | 0.97 |
+    | oracle_modified / toy_sin — RMSE | 0.45 | 0.45 | 0.46 |
+
+- **Read of the partial data:**
+  - **Demand `modified` keeps improving:** RMSE 1.26 → 1.03 → 0.90 across 6k → 10k → 26k. Bias on `modified` flips sign (−0.65 → +0.50) but stays small in absolute value. The §4.3 ordering `modified < baseline` holds at 10k (1.03 < 1.06) but **inverts at 26k** (0.90 < 2.68 still holds for `modified`, but `baseline` deteriorates dramatically — see next bullet).
+  - **Demand `baseline` overshoots at 26k:** mean_bias jumps from −0.61 (10k) to +2.37 (26k) and RMSE from 1.06 to 2.68 — much *worse* than at 10k. Without checkpoint protection, longer training drifts the structural-curve estimate away from truth even as in-sample dev MSE keeps falling. Suggests `baseline` (which uses dev-MSE checkpoint selection on the original DeepGMM moment) hits its dev-best somewhere short of 26k epochs and then deteriorates structurally. The 14k / 18k / 22k recovery runs will localise where the dev-best lands.
+  - **Demand oracles tighten with more training:** `oracle_baseline` RMSE 2.05 → 0.95, `oracle_modified` 1.38 → 0.81. Both oracles approach near-zero bias by 26k. So with full data, longer training is unambiguously beneficial; the overshoot is specific to the partial-data subset (`baseline`).
+  - **toy_sin unaffected:** all four methods within ±0.05 RMSE of Run 3's values across all three epoch counts — the toy DGP plateaued well before 6k epochs, as predicted.
+
+- **Conclusion (interim):** ⚠️ **Sweep incomplete.** The 10k → 26k jump exposes a **non-monotone** relationship between training duration and ATE accuracy for `baseline` on demand under partial data. `modified` is monotone-improving across the recovered points and *beats* `baseline` more decisively at 26k (1.78× lower RMSE) than at 10k (1.03× lower), even though both methods individually drift. Need the 14k / 18k / 22k tasks (queued at `run/M/20260429-01`) to:
+  1. Localise where `baseline` hits its minimum and how steep the climb back up is.
+  2. Confirm the `modified` improvement is monotone or also has an interior optimum.
+  3. Decide on the recommended `max_epochs` for the paper-final run — likely whatever value gives `baseline` its lowest RMSE, with a note about overshoot beyond.
+
+- **Open follow-up tagged onto this iteration (not blocking):** the `training_curves.png` plot loop at line 414-431 of `run_pci_compare.py` is O(reps × epochs²) Python iteration. At 26k epochs × 300 reps it took ~10h of compute on 16 CPUs (single-threaded Python, 15 idle). Vectorising the per-epoch aggregation would cut this to seconds and free the long-pole bottleneck for future high-epoch sweeps.
+
+
+## 2026-05-10 — Phase 5 epoch sweep RE-RUN (full 5 tasks, with per-grid β̂)
+
+- **Tag**: `run/M/20260510-01`
+- **Why re-run**: prior sweep at `run/M/20260428-01` only saved `beta_a1` (a=22) and
+  `beta_a0` (a=36) to `results.csv` per rep. Eight interior treatment values were
+  computed inside `treatment_grid` but never written to disk, and trained models
+  were never pickled, so the per-treatment β̂(a) box-plot the user requested
+  cannot be drawn from the existing dumps. (Verified on Spartan 2026-05-10:
+  no `.pt`/`.pth`/`.pkl`/`.joblib` and no `predictions.csv` in the 28-Apr dump
+  dirs; only results.csv, diagnostics.csv, summary.csv, and two PNGs exist.)
+- **Code change** (this commit, before tag):
+  - `_one_rep` now evaluates `method.beta_hat(a)` at every grid point (10 for
+    demand, 10 for toy_sin) and emits a new `predictions.csv` (long format:
+    `rep, method, dgp, a_idx, a, beta_hat, beta_true, bias_at_a`).
+  - `run_pci_compare.py` auto-generates `per_a_boxplots.png` per dump (4
+    methods side-by-side at each treatment value, one panel per DGP).
+  - New standalone `plot_per_a_boxplots.py` for re-plotting any dump.
+- **Sweep**: same 5-task array `--array=0-4` over epochs
+  `{10000, 14000, 18000, 22000, 26000}` on `[sets.compare]` defaults
+  (n_rep=300, n_train=2000, missing_rate=0.3).
+- **Overwrite safety**: dump folder name = `compare_<config>_<%Y%m%d_%H%M%S_%f>_a<SLURM_ARRAY_TASK_ID>`.
+  Microsecond timestamp + array-id suffix means new dumps cannot collide with
+  each other or with the prior 28-Apr dumps (which had no microsecond/array-id
+  suffix). Both Spartan and local previous results untouched.
+- **Hypothesis under test**: prior partial-data observations hold *and* localise
+  per treatment value:
+  1. `baseline / demand` overshoot at 26k will be visible at the *upper* end of
+     the grid (a closer to the structural-curve OOD region) — i.e. specific
+     a-values, not the integrated ATE alone.
+  2. `modified / demand` per-a bias is more uniform across the grid than
+     `baseline`, even at intermediate epoch counts.
+  3. `oracle_baseline / demand` improves on every grid point as epochs grow
+     (no overshoot under full data), confirming the partial-data overshoot
+     is tied to the missing-W subset.
+- **Predicted plot pattern**: at 22 (lower bulk), all four methods' boxes
+  cluster within ~±2 of zero; at 36 (upper bulk), `baseline` median drifts
+  positive at 26k, while `modified` stays near zero. `oracle_*` cluster tighter
+  with more epochs.
+- **Submitted**: <pending — fill in jobid + start time after sbatch>
+- **Expected wall**: ~21 h on sapphire (26k task is bottleneck); array-parallel.
