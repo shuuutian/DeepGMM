@@ -258,5 +258,7 @@ Two sites changed: the `MODES` list and the `_color_map` for the bias-distributi
   cluster within ~±2 of zero; at 36 (upper bulk), `baseline` median drifts
   positive at 26k, while `modified` stays near zero. `oracle_*` cluster tighter
   with more epochs.
-- **Submitted**: <pending — fill in jobid + start time after sbatch>
+- **Submitted**: jobid `24811355_[0-4]` at 2026-05-10 ~01:55 AEST,
+  partition sapphire (16 CPU / 32 GB / 24 h walltime per task), all 5 tasks
+  running on 3 nodes (bm176, bm177).
 - **Expected wall**: ~21 h on sapphire (26k task is bottleneck); array-parallel.
